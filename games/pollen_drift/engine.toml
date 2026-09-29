@@ -13,7 +13,6 @@ height = 20
 [switches]
 age_nonbarren = true
 set_colour = true
-initial_bloom = true
 
 [params]
 spread_chance = 100
