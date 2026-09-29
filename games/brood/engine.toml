@@ -1,0 +1,64 @@
+[run]
+seed = 7
+max_ticks = 400
+
+[world]
+width = 28
+height = 14
+
+[spawn]
+brood = 3
+moss = 1
+prey = 4
+marker = 1
+
+[switches]
+moss_regrow = true
+prey_age = true
+prey_wander = true
+prey_die = true
+prey_influx = true
+brood_age = true
+brood_burn = true
+brood_step_forage = true
+brood_step_hunt = true
+brood_step_rest = true
+eat_moss = true
+eat_prey = true
+birth = true
+inherit_traits = true
+seed_gen = true
+die_starved = true
+die_old = true
+arrive = true
+track_gen = true
+
+[params]
+max_ticks = 400
+start_energy = 40
+max_energy = 120
+birth_at = 70
+birth_cost = 28
+max_brood = 48
+min_brood = 6
+lifespan = 160
+moss_gain = 10
+prey_gain = 16
+moss_regrow = 12
+moss_max = 3
+prey_spawn_every = 18
+prey_cap = 20
+base_burn = 1
+bulk_burn = 1
+legs_burn = 1
+mut_span = 2
+arrive_every = 25
+win_gen = 4
+win_count = 8
+
+[rhai]
+max_operations = 20000
+max_call_levels = 16
+
+[agent]
+controllable = []
