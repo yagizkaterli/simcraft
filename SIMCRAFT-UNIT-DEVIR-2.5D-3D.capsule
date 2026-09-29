@@ -19,7 +19,7 @@
     "1 REPO: /root/repos/simcraft, dal unit/wf-games-20260929'e gec; calisma burada (firstmate cwd'si degil).",
     "2 KANIT 2.5D: simcraft-play games/colony3d --shot cikti.png --size 1280x720 --ticks 40 (headless lavapipe olur); kamera close/wide/nest denemeleri.",
     "3 FIRST-PERSON: games/lanes (track.ron) ile simcraft-play games/lanes --record kosusu; runs/*.jsonl kaydi + --shot kareler.",
-    "4 TERMIT MOUND: TASK-TERMIT-MOUND-LANES-001 kapsulundeki gorevi isle (isci/asker/oda/tunel/mantar bahcesi FSM).",
+    "4 TERMIT MOUND (CEM'IN OYUNU): games/mound cem/main'de mevcut (9693211, first-person termit, 3D glb + term.rs). `git fetch cem`, devral + gelistir; SIFIRDAN YAZMA. Detay: TASK-TERMIT-MOUND-LANES-001.",
     "5 LANES GELISTIRME: kontrol, hiz, carpisma, coin, skor (mevcut track.ron uzerinden).",
     "6 HER SEY dalinda commit + PR hatti (main'e push YASAK)."
   ],
