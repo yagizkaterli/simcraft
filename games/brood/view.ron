@@ -1,0 +1,11 @@
+#![enable(implicit_some)]
+View(
+    theme: "dark",
+    assets: ["landscape"],
+    layout: Rows([
+        (Fixed(1), C(name: "Title")),
+        (Fill, C(name: "World")),
+        (Fixed(1), C(name: "Legend")),
+        (Fixed(4), C(name: "Events", class: "calm")),
+    ]),
+)

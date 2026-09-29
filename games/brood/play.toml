@@ -1,0 +1,7 @@
+[run]
+seed = 7
+max_ticks = 400
+tick_rate = 20
+
+[params]
+max_ticks = 400
