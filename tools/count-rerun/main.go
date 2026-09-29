@@ -440,6 +440,7 @@ func commandEnv(dir string) []string {
 	return []string{
 		"PATH=" + path,
 		"HOME=/root",
+		"GOCACHE=" + filepath.Join(dir, ".gocache"),
 		"CARGO_TERM_COLOR=never",
 		"GIT_TERMINAL_PROMPT=0",
 		"RUST_BACKTRACE=0",
@@ -542,7 +543,7 @@ func writeCSV(path, toolchain string, results []RunResult, runnable, private, no
 		runnable, private, nocommand, pass, fail, dnr)
 	fmt.Fprintf(f, "repo,pr,head_sha,command,access,runs,per_run_values,median_seconds,rc,result,artifact,reason_if_unresolved\n")
 	for _, r := range results {
-		fmt.Fprintf(f, "%s,%d,%s,%s,%s,%d,%s,%.1f,%d,%s,%s,%s\n",
+		fmt.Fprintf(f, "%s,%d,%s,%s,%s,%d,%s,%.3f,%d,%s,%s,%s\n",
 			r.Repo, r.PR, r.HeadSHA, escapeCSV(r.Command),
 			r.Access, r.Runs, perRun(r.PerRunValues), r.MedianSeconds,
 			r.RC, r.Result, r.Artifact, escapeCSV(r.ReasonUnresolved))
@@ -564,7 +565,7 @@ func writeMD(path, toolchain string, results []RunResult, runnable, private, noc
 	fmt.Fprintf(f, "| repo | pr | head_sha | command | access | runs | per_run_values | median_seconds | rc | result | artifact | reason_if_unresolved |\n")
 	fmt.Fprintf(f, "|------|----|----------|---------|--------|------|---------------|---------------|-----|--------|----------|----------------------|\n")
 	for _, r := range results {
-		fmt.Fprintf(f, "| %s | %d | %s | %s | %s | %d | %s | %.1f | %d | %s | %s | %s |\n",
+		fmt.Fprintf(f, "| %s | %d | %s | %s | %s | %d | %s | %.3f | %d | %s | %s | %s |\n",
 			r.Repo, r.PR, r.HeadSHA, escapeMD(r.Command),
 			r.Access, r.Runs, perRun(r.PerRunValues), r.MedianSeconds,
 			r.RC, r.Result, escapeMD(r.Artifact), escapeMD(r.ReasonUnresolved))
@@ -580,7 +581,7 @@ func writeMD(path, toolchain string, results []RunResult, runnable, private, noc
 func perRun(vals []float64) string {
 	parts := make([]string, len(vals))
 	for i, v := range vals {
-		parts[i] = fmt.Sprintf("%.1f", v)
+		parts[i] = fmt.Sprintf("%.3f", v)
 	}
 	return strings.Join(parts, " ")
 }
