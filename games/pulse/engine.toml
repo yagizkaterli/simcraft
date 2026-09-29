@@ -1,0 +1,32 @@
+[run]
+seed = 42
+max_ticks = 500
+
+[world]
+width = 19
+height = 8
+
+[spawn]
+pacemaker = 1
+muscle = 36
+connective = 6
+
+[switches]
+pacemaker_tick = true
+muscle_tick = true
+muscle_beat_cost = true
+muscle_death = true
+connective_tick = true
+
+[params]
+pace_interval = 10
+refractory_ticks = 3
+energy_cost = 1
+max_energy = 20
+
+[rhai]
+max_operations = 10000
+max_call_levels = 16
+
+[agent]
+controllable = []

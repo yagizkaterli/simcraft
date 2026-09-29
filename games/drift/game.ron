@@ -1,0 +1,112 @@
+#![enable(implicit_some)]
+// Drift — ocean plankton research game.
+// Plankton drift with currents and multiply in sunlit surface waters.
+// Predators hunt plankton. The player controls a research vessel
+// to collect samples. Score = samples collected.
+Game(
+    name: "drift",
+    perception: Direct,
+
+    kinds: {
+        "wall":  (glyph: '#', solid: true),
+        "plankton": (glyph: 'p', fsm: "plankton",
+                     props: { "age": 0 },
+                     glyphs: { "Drift": 'p', "Bloom": 'P' }),
+        "predator": (glyph: 'X', fsm: "predator",
+                     glyphs: { "Hunt": 'X', "Feed": 'O' }),
+        "vessel": (glyph: 'V', solid: true,
+                   props: { "samples": 0 }),
+    },
+
+    params: {
+        "drift_chance": 30,
+        "bloom_chance": 5,
+        "bloom_depth": 3,
+        "breed_chance": 2,
+        "predator_hunt_range": 6,
+        "sample_range": 1,
+        "max_ticks": 300,
+    },
+
+    layout: (
+        legend: { '#': "wall", 'p': "plankton", 'X': "predator", 'V': "vessel" },
+        rows: [
+            "####################",
+            "#..p...p....p......#",
+            "#....p.....p...p...#",
+            "#..p....p.......p..#",
+            "#..................#",
+            "#........V.........#",
+            "#..................#",
+            "#..................#",
+            "#..X...........X...#",
+            "#..................#",
+            "####################",
+        ],
+    ),
+
+    fsms: {
+        "plankton": (
+            initial: "Drift",
+            states: {
+                "Drift": (),
+                "Bloom": (),
+            },
+            transitions: [
+                (from: "Drift", to: "Bloom", when: "me.age > 0 && me.y < p.bloom_depth && roll < p.bloom_chance"),
+                (from: "Bloom", to: "Drift", when: "me.y >= p.bloom_depth"),
+            ],
+        ),
+        "predator": (
+            initial: "Hunt",
+            states: {
+                "Hunt": (),
+                "Feed": (),
+            },
+            transitions: [
+                (from: "Hunt", to: "Feed", when: r#"near.plankton <= 1"#),
+                (from: "Feed", to: "Hunt", when: r#"near.plankton > 1"#),
+            ],
+        ),
+    },
+
+    rules: [
+        // Plankton age and drift randomly.
+        (name: "plankton_age", for: "plankton", then: [ Add("age", "1") ]),
+        (name: "plankton_drift", for: "plankton", state: "Drift",
+         when: "roll < p.drift_chance",
+         then: [ Wander ]),
+
+        // Plankton bloom: reproduce in sunlit surface water.
+        (name: "plankton_bloom", for: "plankton", state: "Bloom",
+         when: "roll < p.breed_chance",
+         then: [ Spawn("plankton") ]),
+
+        // Predator hunts nearest plankton within range.
+        (name: "predator_hunt", for: "predator", state: "Hunt",
+         when: r#"near.plankton <= p.predator_hunt_range"#,
+         then: [ MoveToward("plankton") ]),
+        (name: "predator_eat", for: "predator", state: "Feed",
+         when: "near.plankton <= 1",
+         then: [ Despawn(Nearest("plankton")), Emit("feed") ]),
+        // Predator starves if no plankton nearby.
+        (name: "predator_starve", for: "predator",
+         when: r#"near.plankton > p.predator_hunt_range"#,
+         then: [ Emit("predator_starved"), Despawn(Me) ]),
+    ],
+
+    // Player actions.
+    actions: [
+        (name: "move", for: "vessel", args: ["dx", "dy"],
+         then: [ Move("arg.dx", "arg.dy") ]),
+        (name: "sample", for: "vessel",
+         when: r#"around("plankton", 1) > 0"#,
+         then: [ Add("samples", "1"), Emit("sampled") ]),
+    ],
+
+    score: "me.samples",
+
+    end: [
+        (when: "tick >= p.max_ticks", result: "expedition_end"),
+    ],
+)

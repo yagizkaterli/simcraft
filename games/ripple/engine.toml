@@ -1,0 +1,47 @@
+# ─────────────────────────────────────────────────────────────
+#  STEAM ENGINE — operator panel (ripple)
+# ─────────────────────────────────────────────────────────────
+
+[run]
+seed = 42
+max_ticks = 1000
+
+[world]
+width = 14
+height = 10
+
+[spawn]
+alga = 15
+critter = 5
+
+[switches]
+algae_grow = true
+algae_shade = true
+algae_spawn = true
+algae_nutrient = true
+algae_die = true
+critter_metabolise = true
+critter_wander = true
+critter_eat = true
+critter_breed = true
+critter_starve = true
+sediment_release = true
+
+[params]
+surface_depth = 3
+grow_rate = 1
+bloom_at = 8
+max_algae = 80
+shade_penalty = 2
+critter_hunger_rate = 1
+critter_starve_at = 25
+critter_eat_range = 1
+critter_breed_at = 20
+critter_breed_chance = 15
+critter_max = 50
+nutrient_release = 1
+nutrient_uptake = 2
+
+[rhai]
+max_operations = 10000
+max_call_levels = 16

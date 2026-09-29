@@ -1,0 +1,48 @@
+# ─────────────────────────────────────────────────────────────
+#  STEAM ENGINE — operator panel (forge)
+# ─────────────────────────────────────────────────────────────
+
+[run]
+seed = 42
+max_ticks = 500
+
+[world]
+width = 5
+height = 6
+
+[spawn]
+metal = 3
+
+[switches]
+smith_rest = true
+smith_exhausted = true
+metal_age = true
+metal_heat_near_forge = true
+metal_cool_near_water = true
+metal_melt = true
+metal_crack = true
+metal_quality_decay = true
+
+[params]
+heat_rate = 8
+cool_rate = 2
+quench_rate = 20
+melt_at = 200
+work_temp = 80
+shape_per_hit = 15
+shape_needed = 100
+crack_temp = 60
+crack_damage = 40
+quality_per_hit = 2
+energy_per_action = 5
+max_energy = 100
+rest_gain = 10
+days = 100
+
+[agent]
+controllable = ["smith"]
+observe_radius = 5
+
+[rhai]
+max_operations = 10000
+max_call_levels = 16

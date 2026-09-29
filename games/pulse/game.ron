@@ -1,0 +1,104 @@
+#![enable(implicit_some)]
+// Pulse — cardiac conduction simulation.
+// Pacemaker cells fire at regular intervals, triggering adjacent muscle cells.
+// The signal propagates as a wave through connective tissue bridges.
+// Each contraction costs energy; cells that run out die (fatigue).
+// End: all muscle dead (arrest) or sustained rhythm at tick limit.
+Game(
+    name: "pulse",
+    perception: Direct,
+
+    kinds: {
+        "wall": (glyph: '#', solid: true),
+        "pacemaker": (glyph: 'P', fsm: "pacemaker",
+                      props: { "counter": 0 },
+                      glyphs: { "Charging": 'P', "Firing": '*' }),
+        "muscle": (glyph: 'M', fsm: "muscle",
+                   props: { "energy": 20, "counter": 0 },
+                   glyphs: { "Rest": 'M', "Firing": '*', "Refractory": '.' }),
+        "connective": (glyph: 'C', fsm: "connective",
+                       props: { "counter": 0 },
+                       glyphs: { "Idle": 'C', "Firing": '*' }),
+    },
+
+    params: {
+        "pace_interval": 10,
+        "refractory_ticks": 3,
+        "energy_cost": 1,
+        "max_energy": 20,
+        "max_ticks": 500,
+    },
+
+    layout: (
+        legend: { '#': "wall", 'P': "pacemaker", 'M': "muscle", 'C': "connective" },
+        rows: [
+            "###################",
+            "#PMMM.....CMMMMMMM#",
+            "#.MMM.....CMMMMMMM#",
+            "#.MMM.....CMMMMMMM#",
+            "#.MMM.....CMMMMMMM#",
+            "#.MMM.....CMMMMMMM#",
+            "#.MMM.....CMMMMMMM#",
+            "###################",
+        ],
+    ),
+
+    fsms: {
+        "pacemaker": (
+            initial: "Charging",
+            states: {
+                "Charging": (),
+                "Firing": (enter: [ Set("counter", "0") ]),
+            },
+            transitions: [
+                (from: "Charging", to: "Firing",   when: "tick % p.pace_interval == 0"),
+                (from: "Firing",   to: "Charging", when: "true"),
+            ],
+        ),
+        "muscle": (
+            initial: "Rest",
+            states: {
+                "Rest": (),
+                "Firing": (enter: [ Set("counter", "0"), Emit("beat") ]),
+                "Refractory": (enter: [ Set("counter", "0") ]),
+            },
+            transitions: [
+                (from: "Rest", to: "Firing",
+                 when: r#"around("pacemaker", "Firing", 1) > 0 || around("muscle", "Firing", 1) > 0 || around("connective", "Firing", 1) > 0"#),
+                (from: "Firing",     to: "Refractory", when: "true"),
+                (from: "Refractory", to: "Rest",       when: "me.counter >= p.refractory_ticks"),
+            ],
+        ),
+        "connective": (
+            initial: "Idle",
+            states: {
+                "Idle": (),
+                "Firing": (enter: [ Set("counter", "0") ]),
+            },
+            transitions: [
+                (from: "Idle", to: "Firing",
+                 when: r#"around("pacemaker", "Firing", 1) > 0 || around("muscle", "Firing", 1) > 0 || around("connective", "Firing", 1) > 0"#),
+                (from: "Firing", to: "Idle", when: "true"),
+            ],
+        ),
+    },
+
+    rules: [
+        (name: "pacemaker_tick", for: "pacemaker", then: [ Add("counter", "1") ]),
+        (name: "muscle_tick",    for: "muscle",    then: [ Add("counter", "1") ]),
+        (name: "muscle_beat_cost", for: "muscle", state: "Firing",
+         then: [ Add("energy", "-p.energy_cost") ]),
+        (name: "muscle_death", for: "muscle", when: "me.energy <= 0",
+         then: [ Emit("fatigue"), Despawn(Me) ]),
+        (name: "connective_tick", for: "connective", then: [ Add("counter", "1") ]),
+    ],
+
+    actions: [],
+
+    score: "count.muscle",
+
+    end: [
+        (when: "count.muscle == 0", result: "arrest"),
+        (when: "tick >= p.max_ticks", result: "sustained"),
+    ],
+)

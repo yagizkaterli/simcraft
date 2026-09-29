@@ -1,0 +1,147 @@
+#![enable(implicit_some)]
+// Harbor — two fishing boats competing for the same waters.
+//   Two players each control a boat. They leave their dock, find fish,
+//   catch them, and return to sell at the market. Fish school together;
+//   a school near the dock means easy money but scarce supply far out
+//   means better prices. The market price falls when many fish are sold
+//   and recovers when nobody is selling.
+// Score: gold earned.
+Game(
+    name: "harbor",
+    perception: Direct,
+
+    kinds: {
+        "dock":  (glyph: 'D', solid: true,
+                  props: { "owner": 0 }),
+        "boat":  (glyph: 'B', solid: true, fsm: "boat",
+                  props: { "owner": 0, "fish": 0, "gold": 10, "fuel": 20,
+                           "hx": 0, "hy": 0 },
+                  glyphs: { "Docked": 'B', "Sailing": 'b', "Fishing": 'F' }),
+        "fish":  (glyph: '~', solid: false, fsm: "fish",
+                  props: { "school_id": 0 }),
+        "market": (glyph: '$', solid: true,
+                   props: { "price": 8, "supply": 0, "day_sold": 0 }),
+        "rock":  (glyph: '#', solid: true),
+    },
+
+    params: {
+        "fuel_per_move": 1,
+        "fuel_dock_regen": 5,       // fuel regained per tick at dock
+        "fish_per_cast": 2,         // fish caught per fishing action
+        "max_fish_hold": 10,
+        "price_base": 10,
+        "price_slope": 3,           // price drop per fish sold this day
+        "price_recovery": 1,        // price recovers by this each tick with no sales
+        "school_attract": 2,        // fish move toward others within this range
+        "fish_speed": 2,            // ticks between fish movements
+        "fish_spawn_every": 10,     // ticks between new fish schools spawning
+        "fish_spawn_chance": 30,    // % chance per eligible cell
+        "max_fish": 30,
+        "max_boats": 2,
+        "ticks": 200,
+    },
+
+    layout: (
+        legend: { '#': "rock", '$': "market", '~': "fish",
+                  '1': ("dock", { "owner": 1 }),
+                  '2': ("dock", { "owner": 2 }),
+                  'A': ("boat", { "owner": 1, "hx": 1, "hy": 1 }),
+                  'B': ("boat", { "owner": 2, "hx": 2, "hy": 1 }) },
+        rows: [
+            "##########################",
+            "#1A..............~.......#",
+            "#................#.......#",
+            "#.....##........#.......#",
+            "#.....##........#.......#",
+            "#.......................$#",
+            "#.......................2B",
+            "##########################",
+        ],
+    ),
+
+    fsms: {
+        "boat": (
+            initial: "Docked",
+            states: {
+                "Docked": (),
+                "Sailing": (),
+                "Fishing": (),
+            },
+            transitions: [
+                (from: "Docked",  to: "Sailing", when: "me.fuel > 0"),
+                (from: "Sailing", to: "Docked",  when: "me.x == me.hx && me.y == me.hy"),
+                (from: "Fishing", to: "Sailing", when: "me.fish >= p.max_fish_hold || me.fuel <= 0"),
+                (from: "Sailing", to: "Fishing",
+                 when: r#"around("fish", 1) > 0 && me.fish < p.max_fish_hold"#),
+            ],
+        ),
+        "fish": (
+            initial: "Schooling",
+            states: {
+                "Schooling": (),
+                "Scattered": (),
+            },
+            transitions: [
+                (from: "Schooling", to: "Scattered",
+                 when: r#"around("fish", p.school_attract) == 0"#),
+                (from: "Scattered", to: "Schooling",
+                 when: r#"around("fish", p.school_attract) > 0"#),
+            ],
+        ),
+    },
+
+    rules: [
+        // --- boat: automatic rules ---
+        (name: "boat_refuel", for: "boat", state: "Docked",
+         then: [ Set("fuel", "min(20, me.fuel + p.fuel_dock_regen)") ]),
+        (name: "boat_burn", for: "boat", state: "Sailing",
+         then: [ Add("fuel", "-p.fuel_per_move") ]),
+        (name: "boat_stranded", for: "boat", state: "Sailing",
+         when: "me.fuel <= 0 && (me.x != me.hx || me.y != me.hy)",
+         then: [ MoveToward("dock") ]),
+        // When sailing and out of fuel, drift toward nearest dock
+
+        // --- fish: schooling behavior ---
+        (name: "fish_school", for: "fish", state: "Schooling",
+         when: r#"tick % p.fish_speed == 0"#,
+         then: [ MoveToward("fish") ]),
+        (name: "fish_wander", for: "fish", state: "Scattered",
+         when: r#"tick % p.fish_speed == 0"#,
+         then: [ Wander ]),
+        (name: "fish_regroup", for: "fish", state: "Scattered",
+         when: r#"tick % p.fish_speed == 0 && around("fish", p.school_attract) > 0"#,
+         then: [ Goto("Schooling") ]),
+
+        // --- market: pricing ---
+        (name: "market_price", for: "market",
+         then: [ Set("price", "max(2, p.price_base - me.day_sold * p.price_slope)") ]),
+        (name: "market_recovery", for: "market",
+         when: "me.day_sold > 0 && tick % 5 == 0",
+         then: [ Add("day_sold", "-p.price_recovery") ]),
+    ],
+
+    actions: [
+        (name: "move", for: "boat", state: "Sailing", args: ["dx", "dy"],
+         then: [ Move("arg.dx", "arg.dy") ]),
+        (name: "fish", for: "boat", state: "Fishing",
+         target: Nearest("fish"), when: "it.dist <= 1 && me.fish < p.max_fish_hold",
+         then: [ Despawn(It), Add("fish", "1"), Emit("catch") ]),
+        (name: "dock", for: "boat", state: "Sailing",
+         when: r#"around("dock", 1) > 0"#,
+         then: [ MoveToward("dock") ]),
+        // Sell: only at your own dock, convert fish to gold at market price.
+        (name: "sell", for: "boat", state: "Docked",
+         when: "me.fish > 0",
+         then: [ Need("fish", "1"),
+                 Add("fish", "-1"),
+                 Add("gold", "p.price_base"),
+                 On(Nearest("market"), [ Add("day_sold", "1") ]),
+                 Emit("sell") ]),
+    ],
+
+    score: "me.gold",
+
+    end: [
+        (when: "tick >= p.ticks", result: "time"),
+    ],
+)

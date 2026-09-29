@@ -1,0 +1,139 @@
+#![enable(implicit_some)]
+// Forge — a blacksmith workshop.
+//   The smith heats metal in the forge, hammers it on the anvil, quenches it in water.
+//   Each step changes the metal's temperature, shape and quality.
+//   Heat too little and it won't shape; too much and it melts.
+//   Quench too early and it cracks; too late and it won't harden.
+//   Score: quality of the finished piece × pieces completed.
+Game(
+    name: "forge",
+    perception: Direct,
+
+    kinds: {
+        "wall":  (glyph: '#', solid: true),
+        "smith": (glyph: '@', solid: true, fsm: "smith",
+                  props: { "energy": 100, "carrying": 0 }),
+        "forge": (glyph: 'F', solid: true,
+                  props: { "heat": 100 }),
+        "anvil": (glyph: 'A', solid: true),
+        "water": (glyph: 'W', solid: true),
+        "metal": (glyph: '■', fsm: "metal",
+                  props: { "temp": 20, "shape": 0, "quality": 100, "age": 0 }),
+    },
+
+    params: {
+        "heat_rate": 8,
+        "cool_rate": 2,
+        "quench_rate": 20,
+        "melt_at": 200,
+        "work_temp": 80,
+        "shape_per_hit": 15,
+        "shape_needed": 100,
+        "crack_temp": 60,
+        "crack_damage": 40,
+        "quality_per_hit": 2,
+        "energy_per_action": 5,
+        "max_energy": 100,
+        "rest_gain": 10,
+        "days": 100,
+    },
+
+    layout: (
+        legend: { '#': "wall", '@': "smith", 'F': "forge", 'A': "anvil", 'W': "water", '■': "metal" },
+        rows: [
+            "#####",
+            "#@..#",
+            "#.A.#",
+            "#.■W#",
+            "#.F.#",
+            "#####",
+        ],
+    ),
+
+    fsms: {
+        "smith": (
+            initial: "Idle",
+            transitions: [
+                (from: "Idle", to: "Working", when: "me.carrying > 0"),
+                (from: "Working", to: "Idle", when: "me.carrying == 0"),
+            ],
+            states: {
+                "Idle": (),
+                "Working": (rules: [
+                    (name: "work_drain", then: [ Add("energy", "-1") ]),
+                ]),
+            },
+        ),
+        // Metal goes through stages: raw → hot → shaped → quenched → finished
+        "metal": (
+            initial: "Raw",
+            transitions: [
+                (from: "Raw", to: "Hot", when: "me.temp >= p.work_temp"),
+                (from: "Hot", to: "Raw", when: "me.temp < p.work_temp"),
+            ],
+            states: {
+                "Raw": (rules: [
+                    (name: "metal_warm", then: [ Add("temp", "1") ]),
+                ]),
+                "Hot": (rules: [
+                    (name: "metal_cool", then: [ Add("temp", "-p.cool_rate") ]),
+                ]),
+            },
+        ),
+    },
+
+    rules: [
+        // --- Smith ---
+        (name: "smith_rest", for: "smith", state: "Idle",
+         then: [ Add("energy", "p.rest_gain") ]),
+        (name: "smith_exhausted", for: "smith",
+         when: "me.energy <= 0",
+         then: [ Emit("exhausted") ]),
+
+        // --- Metal passive effects ---
+        (name: "metal_age", for: "metal", then: [ Add("age", "1") ]),
+        (name: "metal_heat_near_forge", for: "metal",
+         when: r#"around("forge", 1) > 0"#,
+         then: [ Add("temp", "p.heat_rate") ]),
+        (name: "metal_cool_near_water", for: "metal",
+         when: r#"around("water", 1) > 0"#,
+         then: [ Add("temp", "-p.quench_rate") ]),
+        (name: "metal_melt", for: "metal",
+         when: "me.temp >= p.melt_at",
+         then: [ Emit("melted"), Despawn(Me) ]),
+        (name: "metal_crack", for: "metal",
+         when: "me.temp <= p.crack_temp && me.age > 5",
+         then: [ Add("quality", "-p.crack_damage"), Emit("cracked") ]),
+        // Quality decay from repeated heating
+        (name: "metal_quality_decay", for: "metal",
+         when: "me.temp > p.work_temp && me.shape > 0",
+         then: [ Add("quality", "-1") ]),
+    ],
+
+    // Actions the player can take
+    actions: [
+        (name: "heat", for: "smith",
+         then: [ MoveToward("forge") ]),
+        (name: "hammer", for: "smith", target: Nearest("metal"),
+         when: "it.dist <= 2 && it.temp >= p.work_temp",
+         then: [ On(It, [ Add("shape", "p.shape_per_hit"),
+                          Add("quality", "p.quality_per_hit") ]) ]),
+        (name: "quench", for: "smith", target: Nearest("metal"),
+         when: "it.dist <= 2 && it.temp >= p.work_temp",
+         then: [ On(It, [ Add("temp", "-p.quench_rate * 3") ]) ]),
+        (name: "pick", for: "smith", target: Nearest("metal"),
+         when: "it.dist <= 3 && me.carrying == 0",
+         then: [ MoveToward("metal"), Set("carrying", "1"), Despawn(It) ]),
+        (name: "place", for: "smith",
+         when: "me.carrying > 0",
+         then: [ Spawn("metal"), Set("carrying", "0") ]),
+        (name: "rest", for: "smith",
+         then: [ Set("energy", "p.max_energy") ]),
+    ],
+
+    score: "me.energy + count.metal * 10",
+
+    end: [
+        (when: "tick >= p.days", result: "time"),
+    ],
+)

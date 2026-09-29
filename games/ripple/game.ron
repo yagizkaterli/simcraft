@@ -1,0 +1,114 @@
+#![enable(implicit_some)]
+// Ripple — a pond ecosystem viewed from the side.
+//   Sunlight reaches the surface (top rows), feeding algae.
+//   Tiny critters (daphnia) eat algae, reproduce when well-fed.
+//   Algae overgrow and compete for light; a bloom shades the water below.
+//   No predators: the interest is in population cycles from simple rules.
+// Score: total biomass (algae mass + critter energy).
+Game(
+    name: "ripple",
+    perception: Direct,
+
+    kinds: {
+        "sediment": (glyph: '#', solid: true, fsm: "sediment",
+                     props: { "nutrients": 10 }),
+        "alga": (glyph: 'o',
+                 props: { "mass": 2, "age": 0 }),
+        "critter": (glyph: 'c', fsm: "critter",
+                    props: { "energy": 10, "hunger": 0 }),
+    },
+
+    params: {
+        "surface_depth": 3,
+        "grow_rate": 1,
+        "bloom_at": 8,
+        "max_algae": 80,
+        "shade_penalty": 2,
+        "critter_hunger_rate": 1,
+        "critter_starve_at": 25,
+        "critter_eat_range": 1,
+        "critter_breed_at": 20,
+        "critter_breed_chance": 15,
+        "critter_max": 50,
+        "nutrient_release": 1,
+        "nutrient_uptake": 2,
+    },
+
+    layout: (
+        legend: { '#': "sediment", '.': "alga", 'c': "critter" },
+        rows: [
+            "..............",
+            "..............",
+            "..............",
+            "..............",
+            "..............",
+            "..............",
+            "..............",
+            "..............",
+            "..............",
+            "##############",
+        ],
+    ),
+
+    fsms: {
+        "critter": (
+            initial: "Search",
+            transitions: [
+                (from: "Search", to: "Eat", when: r#"around("alga", p.critter_eat_range) > 0"#),
+                (from: "Eat", to: "Search", when: r#"around("alga", p.critter_eat_range) == 0"#),
+            ],
+        ),
+        "sediment": (
+            initial: "Rich",
+            transitions: [],
+            states: { "Rich": () },
+        ),
+    },
+
+    rules: [
+        // --- Algae ---
+        (name: "algae_grow", for: "alga",
+         when: "me.y < p.surface_depth",
+         then: [ Add("mass", "p.grow_rate"), Add("age", "1") ]),
+        // Shade penalty: algae below the surface grow slower if there are many algae above
+        (name: "algae_shade", for: "alga",
+         when: "me.y >= p.surface_depth && count.alga > 20",
+         then: [ Add("mass", "-p.shade_penalty") ]),
+        (name: "algae_spawn", for: "alga",
+         when: "me.mass >= p.bloom_at && count.alga < p.max_algae && me.y < p.surface_depth",
+         then: [ Add("mass", "-p.bloom_at"), Spawn("alga"), Emit("spawn_alga") ]),
+        (name: "algae_nutrient", for: "alga",
+         when: "me.y < p.surface_depth",
+         then: [ Add("mass", "p.nutrient_uptake"),
+                 On(Nearest("sediment"), [ Add("nutrients", "-1") ]) ]),
+        (name: "algae_die", for: "alga",
+         when: "me.mass <= 0",
+         then: [ Emit("die_alga"), Despawn(Me) ]),
+
+        // --- Critters ---
+        (name: "critter_metabolise", for: "critter",
+         then: [ Add("hunger", "p.critter_hunger_rate") ]),
+        (name: "critter_wander", for: "critter", state: "Search",
+         then: [ Wander ]),
+        (name: "critter_eat", for: "critter", state: "Eat",
+         target: Nearest("alga"), when: "it.dist <= p.critter_eat_range",
+         then: [ Add("energy", "2"), Add("hunger", "-5"),
+                 On(It, [ Add("mass", "-1") ]) ]),
+        (name: "critter_breed", for: "critter",
+         when: "me.energy >= p.critter_breed_at && roll < p.critter_breed_chance && count.critter < p.critter_max",
+         then: [ Add("energy", "-8"), Spawn("critter"), Emit("born_critter") ]),
+        (name: "critter_starve", for: "critter",
+         when: "me.hunger >= p.critter_starve_at",
+         then: [ Emit("die_critter"), Despawn(Me) ]),
+
+        // --- Sediment ---
+        (name: "sediment_release", for: "sediment",
+         then: [ Add("nutrients", "p.nutrient_release") ]),
+    ],
+
+    end: [
+        (when: "count.alga == 0", result: "collapse"),
+    ],
+
+    score: "count.alga + count.critter * 3",
+)
