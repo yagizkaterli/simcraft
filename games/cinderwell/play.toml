@@ -1,0 +1,11 @@
+# PLAYER PANEL (cinderwell) — what `simcraft-play` runs.
+
+[run]
+seed = 1
+max_ticks = 5000
+
+[params]
+# leave designer defaults unless tuning a play session
+
+[agent]
+controllable = ["kor"]
