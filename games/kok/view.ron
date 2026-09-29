@@ -1,0 +1,25 @@
+#![enable(implicit_some)]
+// KOK: side-view soil column. The custom projection maps x→screen-x, z→screen-y, fixing y=0,
+// giving a vertical cross-section of the root growing through the soil layers.
+View(
+    theme: "dark",
+    assets: ["landscape"],
+    components: {
+        "Sidebar": Rows([
+            (Fixed(5),  C(name: "Env")),
+            (Fill,      C(name: "Inspector")),
+            (Fixed(6),  C(name: "Series", props: (names: ["kok.energy", "kok.depth", "count.sivri", "count.dugum"]))),
+            (Fixed(6),  C(name: "Counts")),
+        ]),
+    },
+    layout: Rows([
+        (Fixed(1), C(name: "Title")),
+        (Fill, Cols([
+            (Percent(60), C(name: "World", props: (projection: (dim: "custom", n: 3, x: 0, y: 2, fixed: [(1, 0)])))),
+            (Fill, C(name: "Sidebar")),
+        ])),
+        (Fixed(1), C(name: "Legend")),
+        (Fixed(5), C(name: "Events", class: "calm")),
+        (Fixed(1), C(name: "Help")),
+    ]),
+)
