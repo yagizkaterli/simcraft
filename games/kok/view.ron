@@ -1,6 +1,6 @@
 #![enable(implicit_some)]
-// KOK: side-view soil column. The custom projection maps x→screen-x, z→screen-y, fixing y=0,
-// giving a vertical cross-section of the root growing through the soil layers.
+// KOK: side-view soil column. custom projection maps x→screen-x, z→screen-y (y fixed=0).
+// Also a stacked 2.5D layer view of the upper levels for gallery comparison.
 View(
     theme: "dark",
     assets: ["landscape"],
@@ -15,7 +15,14 @@ View(
     layout: Rows([
         (Fixed(1), C(name: "Title")),
         (Fill, Cols([
-            (Percent(60), C(name: "World", props: (projection: (dim: "custom", n: 3, x: 0, y: 2, fixed: [(1, 0)])))),
+            (Percent(55), Rows([
+                // Cross-section: depth down the screen, tinted by nutrient veins.
+                (Percent(70), C(name: "World", props: (projection: (dim: "custom", n: 3, x: 0, y: 2, fixed: [(1, 0)], tint: "nutrient")))),
+                // Layered 2.5D stack of the shallow levels (back→front).
+                (Fill, C(name: "World", props: (projection: (dim: "2.5D", perspectives: [
+                    (name: "shaft", order: [0, 1, 2, 3, 4], focus: 0, step: (2, -1), fade: 40),
+                ])))),
+            ])),
             (Fill, C(name: "Sidebar")),
         ])),
         (Fixed(1), C(name: "Legend")),

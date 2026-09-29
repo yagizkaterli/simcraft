@@ -1,85 +1,104 @@
 #![enable(implicit_some)]
-// KOK — an original 2.5D root-organism simulation.
+// KOK — original 2.5D root-organism simulation.
 //
-// A Kok (main root body) grows downward through a layered soil column (toprak → kum → kil → kaya),
-// branching Sivri (root tips) that extend sideways seeking nutrients, and forming Dugum (storage nodes)
-// where nutrients are rich. Deterministic: no_float, only_i64, same seed → same game.
+// A Kok (main root body) starts on the open surface and grows downward through a
+// layered soil column (toprak → kum → kil → kaya). It digs a shaft, branches Sivri
+// (root tips) sideways into the rock, and forms Dugum (storage nodes) where nutrient
+// veins are rich. Dugum feed energy back to the Kok.
 //
-// End: Kok reaches the bottom → "rooted" (win). Kok's energy exhausted → "exhausted" (lose).
+// Deterministic: no_float, only_i64, same seed → same hashes.
+// 2.5D: side-view soil column (x across, z down) via stage.ron + view.ron.
+//
+// End: Kok reaches the bottom → "rooted". Kok's energy exhausted → "exhausted".
+// Original names/entities: Kok, Sivri, Dugum, toprak/kum/kil/kaya. Not Spore/Sanalika.
 Game(
     name: "kok",
 
     fields: {
-        "soil":     (init: 1),            // terrain: non-zero = solid
+        // Non-zero soil is terrain: nothing spawns or walks inside it until dug out.
+        "soil":      (init: 0),
         "soil_type": (init: 0),           // 0=toprak, 1=kum, 2=kil, 3=kaya
-        "nutrient":  (init: 0, diffusion: 6),  // diffuses through soil
-        "moisture":  (init: 100, diffusion: 8), // diffuses through soil
+        "nutrient":  (init: 0, diffusion: 6),
+        "moisture":  (init: 40, diffusion: 8),
     },
     terrain: "soil",
 
     kinds: {
         "kok": (glyph: 'K', fsm: "kok",
-                props: { "energy": 1000, "depth": 0, "branched": 0 },
-                senses: { "clock": "tick" }),
+                props: { "energy": 800, "depth": 0, "branched": 0, "age": 0 },
+                senses: {
+                    "clock": "tick",
+                    "nutrient_here": r#"field("nutrient")"#,
+                    "below_soil": r#"field_at("soil", 0, 0, 1)"#,
+                    "tips": "count.sivri",
+                }),
         "sivri": (glyph: 'S', fsm: "sivri",
-                  props: { "dir": 0 },
-                  senses: { "clock": "tick", "nutrient_here": "field(\"nutrient\")" }),
+                  props: { "dir": 0, "reach": 0, "age": 0 },
+                  senses: {
+                      "clock": "tick",
+                      "nutrient_here": r#"field("nutrient")"#,
+                  }),
         "dugum": (glyph: 'D', fsm: "dugum",
-                  props: { "stored": 0 },
-                  senses: { "clock": "tick" }),
-        // Hidden marker: spawned when Kok reaches bottom, triggers win condition.
+                  props: { "stored": 0, "age": 0 },
+                  senses: {
+                      "clock": "tick",
+                      "nutrient_here": r#"field("nutrient")"#,
+                  }),
+        // Hidden marker: Kok reached bottom.
         "win_flag": (glyph: ' ', hidden: true, props: {}),
     },
 
     params: {
-        "growth_cost": 10,          // energy Kok spends per tick to grow 1 cell deeper (*10)
-        "sivri_cost": 5,            // energy Kok spends per tick per Sivri (*10, i.e. 0.5)
-        "nutrient_threshold": 20,   // nutrient level needed to form a Dugum
-        "branch_interval": 4,       // Kok spawns Sivri every N cells of depth
-        "dugum_yield": 8,           // energy a Dugum gives the Kok per tick
-        "passive_absorb": 1,        // energy Kok absorbs from soil nutrients per tick
-        "sivri_search_max": 6,      // max cells a Sivri extends before dying
+        "growth_cost": 12,         // energy Kok spends to dig one cell deeper
+        "sivri_cost": 2,           // energy Kok pays per living Sivri per tick
+        "nutrient_threshold": 14,  // nutrient at Sivri → form a Dugum
+        "branch_every": 3,         // branch every N depth gained
+        "dugum_yield": 6,          // energy Dugum pulls from soil per tick (cap)
+        "passive_absorb": 2,       // Kok sips from the cell it occupies
+        "sivri_max_reach": 5,      // how far a tip may extend before it dies
+        "max_sivri": 16,
+        "max_ticks": 800,
     },
 
     layout: (
+        // Glyphs set fields only. '.' is open tunnel/air (soil=0). Letters are soil.
+        // 'K' is the Kok on open surface — must NOT sit on terrain or spawn is dropped.
+        // Rich veins ('V') sit in kil so tips have something to find.
         cells: {
-            't': { "soil": 1, "soil_type": 0, "nutrient": 8, "moisture": 90 },
-            'k': { "soil": 1, "soil_type": 1, "nutrient": 4, "moisture": 65 },
-            'i': { "soil": 1, "soil_type": 2, "nutrient": 18, "moisture": 45 },
-            'r': { "soil": 1, "soil_type": 3, "nutrient": 2, "moisture": 25 },
+            't': { "soil": 1, "soil_type": 0, "nutrient": 6,  "moisture": 90 },
+            'u': { "soil": 1, "soil_type": 1, "nutrient": 4,  "moisture": 60 },
+            'i': { "soil": 1, "soil_type": 2, "nutrient": 10, "moisture": 45 },
+            'r': { "soil": 1, "soil_type": 3, "nutrient": 2,  "moisture": 20 },
+            'V': { "soil": 1, "soil_type": 2, "nutrient": 28, "moisture": 50 },
+            'v': { "soil": 1, "soil_type": 1, "nutrient": 18, "moisture": 55 },
+            '.': { "soil": 0, "soil_type": 0, "nutrient": 0,  "moisture": 80 },
         },
         legend: { 'K': "kok" },
         levels: [
-            // z=0  surface
-            ["ttttttttKttttttttttt"],
-            // z=1..4  toprak (top 5)
+            // z=0  open surface — Kok starts here
+            ["..........K........."],
+            // z=1..4  toprak
             ["tttttttttttttttttttt"],
             ["tttttttttttttttttttt"],
+            ["ttt.tttttttttttttttt"],
             ["tttttttttttttttttttt"],
-            ["tttttttttttttttttttt"],
-            // z=5..14  kum (5-15)
-            ["kkkkkkkkkkkkkkkkkkkk"],
-            ["kkkkkkkkkkkkkkkkkkkk"],
-            ["kkkkkkkkkkkkkkkkkkkk"],
-            ["kkkkkkkkkkkkkkkkkkkk"],
-            ["kkkkkkkkkkkkkkkkkkkk"],
-            ["kkkkkkkkkkkkkkkkkkkk"],
-            ["kkkkkkkkkkkkkkkkkkkk"],
-            ["kkkkkkkkkkkkkkkkkkkk"],
-            ["kkkkkkkkkkkkkkkkkkkk"],
-            ["kkkkkkkkkkkkkkkkkkkk"],
-            // z=15..24  kil (15-25)
+            // z=5..10  kum + some veins
+            ["uuuuuuuuuuuuuuuuuuuu"],
+            ["uuuuuuvuuuuuuuuuuuuu"],
+            ["uuuuuuuuuuuuuuuuuuuu"],
+            ["uuuuuuuuuuvuuuuuuuuu"],
+            ["uuuuuuuuuuuuuuuuuuuu"],
+            ["uuuuvuuuuuuuuuuuuuuu"],
+            // z=11..18  kil + rich veins
             ["iiiiiiiiiiiiiiiiiiii"],
+            ["iiiiViiiiiiiiiiiiiii"],
             ["iiiiiiiiiiiiiiiiiiii"],
+            ["iiiiiiiiiiViiiiiiiii"],
             ["iiiiiiiiiiiiiiiiiiii"],
+            ["iiiiiViiiiiiiiiiiiii"],
             ["iiiiiiiiiiiiiiiiiiii"],
-            ["iiiiiiiiiiiiiiiiiiii"],
-            ["iiiiiiiiiiiiiiiiiiii"],
-            ["iiiiiiiiiiiiiiiiiiii"],
-            ["iiiiiiiiiiiiiiiiiiii"],
-            ["iiiiiiiiiiiiiiiiiiii"],
-            ["iiiiiiiiiiiiiiiiiiii"],
-            // z=25..29  kaya (25-30)
+            ["iiiiiiiiiiiiViiiiiii"],
+            // z=19..23  kaya (hard, poor)
             ["rrrrrrrrrrrrrrrrrrrr"],
             ["rrrrrrrrrrrrrrrrrrrr"],
             ["rrrrrrrrrrrrrrrrrrrr"],
@@ -93,29 +112,40 @@ Game(
             initial: "Growing",
             states: {
                 "Growing": (rules: [
-                    // Absorb nutrients from the current cell.
-                    (name: "kok_absorb", then: [
-                        Add("energy", "min(p.passive_absorb, field(\"nutrient\"))"),
-                    ]),
-                    // Grow downward: dig the cell below, then move into it.
-                    (name: "grow_down", when: "me.z < 29 && me.energy >= p.growth_cost",
+                    (name: "kok_age", then: [ Add("age", "1") ]),
+                    // Sip nutrients from the open cell the shaft occupies.
+                    (name: "kok_absorb",
+                     then: [ Add("energy", "min(p.passive_absorb, sense.nutrient_here)"),
+                             SetField("nutrient", "max(0, sense.nutrient_here - p.passive_absorb)") ]),
+                    // Dig the cell below, then step into it (same tick: dig lands first).
+                    (name: "grow_down",
+                     when: "me.z < 23 && me.energy >= p.growth_cost && sense.below_soil != 0",
                      then: [
                          SetFieldAt("soil", "0", "0", "1", "0"),
                          Move3("0", "0", "1"),
                          Add("depth", "1"),
                          Add("energy", "-p.growth_cost"),
                      ]),
-                    // Branch: spawn a Sivri to each side at regular depth intervals.
-                    (name: "branch_left", when: "me.depth > 0 && me.depth % p.branch_interval == 0 && me.branched < 999",
+                    // Already open below (pre-dug pocket): just descend.
+                    (name: "descend_open",
+                     when: "me.z < 23 && me.energy >= p.growth_cost && sense.below_soil == 0",
+                     then: [
+                         Move3("0", "0", "1"),
+                         Add("depth", "1"),
+                         Add("energy", "-p.growth_cost"),
+                     ]),
+                    // Branch tips left and right at regular depths.
+                    (name: "branch_left",
+                     when: "me.depth > 0 && me.depth % p.branch_every == 0 && sense.tips < p.max_sivri",
+                     then: [ Spawn("sivri"), Add("branched", "1"), Emit("branch") ]),
+                    (name: "branch_right",
+                     when: "me.depth > 0 && me.depth % p.branch_every == 0 && sense.tips < p.max_sivri",
                      then: [ Spawn("sivri"), Add("branched", "1") ]),
-                    (name: "branch_right", when: "me.depth > 0 && me.depth % p.branch_interval == 0 && me.branched < 999",
-                     then: [ Spawn("sivri"), Add("branched", "1") ]),
-                    // Win: reached the bottom.
-                    (name: "reach_bottom", when: "me.z >= 29",
-                     then: [ Spawn("win_flag"), Despawn(Me), Emit("rooted") ]),
-                    // Lose: ran out of energy.
+                    // Bottom of the column.
+                    (name: "reach_bottom", when: "me.z >= 23",
+                     then: [ Spawn("win_flag"), Emit("rooted") ]),
                     (name: "exhausted", when: "me.energy <= 0",
-                     then: [ Despawn(Me), Emit("exhausted") ]),
+                     then: [ Emit("exhausted"), Despawn(Me) ]),
                 ]),
             },
         ),
@@ -124,38 +154,39 @@ Game(
             initial: "Extending",
             states: {
                 "Extending": (
-                    enter: [
-                        // Alternate direction based on spawn order: even id → left, odd → right.
-                        Set("dir", "if me.id % 2 == 0 { -1 } else { 1 }"),
-                        // Move one cell in the chosen direction immediately on spawn.
-                        SetFieldAt("soil", "if me.id % 2 == 0 { -1 } else { 1 }", "0", "0", "0"),
-                        Move("if me.id % 2 == 0 { -1 } else { 1 }", "0"),
-                    ],
                     rules: [
-                        // Sivri upkeep: costs energy from the Kok each tick.
+                        // enter does not run at birth — pick direction on first tick.
+                        (name: "pick_dir", when: "me.dir == 0",
+                         then: [ Set("dir", "if me.id % 2 == 0 { -1 } else { 1 }") ]),
+                        (name: "sivri_age", then: [ Add("age", "1") ]),
+                        // Upkeep billed to the Kok.
                         (name: "upkeep", target: Nearest("kok"),
+                         when: "it.energy >= p.sivri_cost",
                          then: [ On(It, [ Add("energy", "-p.sivri_cost") ]) ]),
-                        // Starve if the Kok can't pay.
                         (name: "starve", target: Nearest("kok"),
                          when: "it.energy < p.sivri_cost",
                          then: [ Despawn(Me) ]),
-                        // Check for nutrients: if high enough, become a Dugum.
-                        (name: "form_dugum", when: "sense.nutrient_here >= p.nutrient_threshold",
-                         then: [ Spawn("dugum"), Despawn(Me), Emit("formed") ]),
-                        // Extend left.
-                        (name: "extend_left", when: "me.dir < 0 && me.x > 0",
+                        // Rich soil → storage node.
+                        (name: "form_dugum",
+                         when: "sense.nutrient_here >= p.nutrient_threshold",
+                         then: [ Spawn("dugum"), Emit("formed"), Despawn(Me) ]),
+                        // Dig sideways into soil, then step in.
+                        (name: "extend_left",
+                         when: "me.dir < 0 && me.x > 0 && me.reach < p.sivri_max_reach",
                          then: [
                              SetFieldAt("soil", "-1", "0", "0", "0"),
                              Move("-1", "0"),
+                             Add("reach", "1"),
                          ]),
-                        // Extend right.
-                        (name: "extend_right", when: "me.dir > 0 && me.x < 19",
+                        (name: "extend_right",
+                         when: "me.dir > 0 && me.x < 19 && me.reach < p.sivri_max_reach",
                          then: [
                              SetFieldAt("soil", "1", "0", "0", "0"),
                              Move("1", "0"),
+                             Add("reach", "1"),
                          ]),
-                        // Hit edge: despawn.
-                        (name: "hit_wall", when: "(me.dir < 0 && me.x <= 0) || (me.dir > 0 && me.x >= 19)",
+                        (name: "spent",
+                         when: "me.reach >= p.sivri_max_reach",
                          then: [ Despawn(Me) ]),
                     ],
                 ),
@@ -166,26 +197,43 @@ Game(
             initial: "Store",
             states: {
                 "Store": (rules: [
-                    // Absorb nutrients from the soil and convert to stored energy.
-                    (name: "dugum_absorb", then: [
-                        Add("stored", "min(p.dugum_yield, field(\"nutrient\"))"),
-                        SetField("nutrient", "max(0, field(\"nutrient\") - p.dugum_yield)"),
-                    ]),
-                    // Transfer stored energy to the Kok.
+                    (name: "dugum_age", then: [ Add("age", "1") ]),
+                    (name: "dugum_absorb",
+                     then: [
+                         Add("stored", "min(p.dugum_yield, sense.nutrient_here)"),
+                         SetField("nutrient", "max(0, sense.nutrient_here - p.dugum_yield)"),
+                     ]),
                     (name: "transfer", target: Nearest("kok"),
-                     then: [ On(It, [ Add("energy", "me.stored") ]), Set("stored", "0") ]),
+                     when: "me.stored > 0",
+                     then: [ On(It, [ Add("energy", "me.stored") ]), Set("stored", "0"), Emit("fed") ]),
                 ]),
             },
         ),
     },
 
-    rules: [
-        // Soil layers diffuse moisture and nutrients.
-        // (handled by field diffusion in the field definitions above)
+    rules: [],
+
+    actions: [
+        // Player may urge the Kok one cell deeper when it has energy.
+        (name: "press_down", for: "kok",
+         when: "me.z < 23 && me.energy >= p.growth_cost",
+         then: [
+             SetFieldAt("soil", "0", "0", "1", "0"),
+             Move3("0", "0", "1"),
+             Add("depth", "1"),
+             Add("energy", "-p.growth_cost"),
+             Emit("press"),
+         ]),
+        (name: "branch_now", for: "kok",
+         when: "sense.tips < p.max_sivri && me.energy >= p.sivri_cost * 2",
+         then: [ Spawn("sivri"), Spawn("sivri"), Add("branched", "2"), Emit("branch") ]),
     ],
+
+    score: "me.depth * 10 + me.branched * 3 + me.energy / 10 + count.dugum * 15",
 
     end: [
         (when: "count.win_flag > 0", result: "rooted"),
-        (when: "count.kok == 0",     result: "exhausted"),
+        (when: "count.kok == 0", result: "exhausted"),
+        (when: "tick >= p.max_ticks", result: "time"),
     ],
 )
