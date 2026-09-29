@@ -1,0 +1,15 @@
+---
+source: test/tests/all/work.rs
+expression: profile(&dir)
+---
+ticks 60, entities per tick 44.0
+per tick:        evals      21.9  queries      7.0  maps      8.0
+per entity-tick: evals      0.50  queries     0.16  maps     0.18
+hottest rules (checks per tick, % that fired):
+  chill_away                     2.0   83.3%
+  grow                           2.0    3.3%
+  mood_falls                     2.0   83.3%
+  mood_rises                     2.0    0.0%
+  warm_by_hearth                 2.0    0.0%
+  burn                           1.0   50.0%
+checked but never fired: mood_rises, warm_by_hearth, festival

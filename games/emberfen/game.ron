@@ -1,0 +1,203 @@
+#![enable(implicit_some)]
+// Emberfen. An original creature-evolution simulation (nothing here is borrowed from another game:
+// the marsh, the vents, the blobs and the gull are ours).
+//
+// The marsh is cold. The only heat comes from thermal vents: warmth is a field that diffuses outward and
+// leaks away, so each vent holds a plume of warm water, and the plumes shrink when the year turns cold.
+// Algae thicken only in warm water. Blobs graze the algae, and a cold blob burns energy faster than a warm
+// one, so a blob that fails to stay near a vent and its algae starves. A gull takes the ones that pay no
+// attention, and it lives longer than any single blob, so that pressure never lifts.
+//
+// Nothing tells a blob where to go: each is born with a brain and nothing else. A well-fed blob broods, and
+// its young inherit its brain with small mutations. What the marsh rewards is what survives -- foraging,
+// warmth, flight -- so the population's behaviour drifts with the seasons. Evolution is the game.
+Game(
+    name: "emberfen",
+    environments: ["seasons"],
+
+    fields: {
+        // Warmth in fine units: integer diffusion needs them, or a slow plume rounds away to nothing.
+        "warmth": (init: 0, diffusion: 6, decay: 3),
+    },
+
+    kinds: {
+        // A vent: the marsh's only heat. It follows the year (full in summer, a pilot light in winter).
+        "vent": (glyph: 'V', solid: true, fsm: "vent",
+                 senses: { "season_warmth": "env.seasons.warmth", "clock": "tick",
+                           "crowd": "count.blob" }),
+
+        // Algae: a patch that thickens only where the water is warm, and is grazed back down.
+        "algae": (glyph: '~', fsm: "algae", props: { "mass": 0 },
+                  glyphs: { "Bloom": '~', "Thin": ',' },
+                  senses: { "warmth": r#"clamp(field("warmth") / 100, 0, 100)"#, "clock": "tick" }),
+
+        // A blob: the creature. Its brain (its genome) decides the step; no rule knows where to go.
+        "blob": (glyph: 'o', fsm: "blob",
+                 props: { "energy": 0, "age": 0 },
+                 glyphs: { "Cold": 'o', "Warm": 'O' },
+                 // What a blob knows: how warm the water it stands in is, which way food and the gull lie,
+                 // and how many of its kind are alive. Nothing about the world beyond that.
+                 senses: { "warmth": r#"clamp(field("warmth") / 100, 0, 100)"#,
+                           "food_x": r#"toward_x("algae", "Bloom")"#, "food_y": r#"toward_y("algae", "Bloom")"#,
+                           "threat_x": r#"toward_x("gull")"#, "threat_y": r#"toward_y("gull")"#,
+                           "crowd": "count.blob" },
+                 // Seven numbers in, one of four steps out. Nothing says which step is good.
+                 brain: (inputs: { "food_x": "sense.food_x * 100", "food_y": "sense.food_y * 100",
+                                   "threat_x": "sense.threat_x * 100", "threat_y": "sense.threat_y * 100",
+                                   "warmth": "sense.warmth * 100 / 100 - 50",
+                                   "energy": "me.energy * 100 / p.max_energy",
+                                   // A coin to flip: lets a brain explore instead of looping.
+                                   "noise": "rand(201) - 100" },
+                         hidden: [8],
+                         outputs: ["north", "east", "south", "west"],
+                         mutation: 45, step: 12)),
+
+        // A gull: it takes blobs it can reach, and outlives them all.
+        "gull": (glyph: 'G', fsm: "gull", props: { "taken": 0 },
+                 senses: { "prey": "near.blob", "clock": "tick" }),
+    },
+
+    params: {
+        // Heat.
+        "vent_heat": 1800,      // warmth a vent adds every tick, whatever the season (the pilot light)
+        "vent_boost": 1200,     // ...plus this much at the height of summer
+        "body_heat": 20,        // warmth a blob adds to its own cell (a crowd warms itself)
+        "warmth_max": 12000,    // no plume grows past this
+        "comfort_at": 12,       // warmth at which a blob counts as comfortable
+        // Algae.
+        "bloom_warmth": 10,     // algae thickens only in water at least this warm
+        "bloom_every": 3,       // ticks between one unit of growth
+        "bloom_at": 2,          // mass at which a patch counts as a bloom
+        "algae_max": 8,         // mass one patch holds
+        // Blobs.
+        "start_energy": 70,     // what a newborn has to live on
+        "max_energy": 200,
+        "base_cost": 1,         // energy burned each tick, whatever the water
+        "cold_cost": 2,         // ...plus this much at 0 warmth (an ectotherm in a cold marsh)
+        "bite": 20,             // energy from one mouthful of algae
+        "birth_at": 100,        // energy at which a blob broods...
+        "birth_cost": 60,       // ...and what brooding costs it
+        "lifespan": 900,        // old age: generations must turn over
+        "blob_cap": 60,
+        "min_blobs": 12,        // below this, larvae drift in now and then (a floor for the population)
+        "arrive_every": 25,
+        // Gulls.
+        "sight": 7,             // a gull dives at a blob this close
+        "gull_stride": 3,       // gulls move on one tick in this many
+        "gull_meal_stride": 12, // ...and take a blob on one tick in this many
+        "max_ticks": 3000,
+    },
+
+    layout: (
+        legend: { 'V': "vent", '~': "algae", 'o': "blob", 'G': "gull" },
+        rows: [
+            "................................",
+            "......V..................V......",
+            "....~~~~................~~~~....",
+            "....ooooo.......................",
+            "................................",
+            "................................",
+            "................................",
+            ".......G................G.......",
+            "................................",
+            "................................",
+            "................................",
+            "................................",
+            "....~~~~................~~~~....",
+            "......V..................V......",
+            "................................",
+        ],
+    ),
+
+    fsms: {
+        "vent": (initial: "Open", transitions: [], states: { "Open": () }),
+
+        // A patch blooms when it thickens, thins when it is grazed down.
+        "algae": (
+            initial: "Thin",
+            transitions: [
+                (from: "Thin", to: "Bloom", when: "me.mass >= p.bloom_at"),
+                (from: "Bloom", to: "Thin", when: "me.mass < p.bloom_at"),
+            ],
+        ),
+
+        // The read-out the operator watches: is this creature in warm water or cold?
+        "blob": (
+            initial: "Cold",
+            transitions: [
+                (from: "Cold", to: "Warm", when: "sense.warmth >= p.comfort_at"),
+                (from: "Warm", to: "Cold", when: "sense.warmth < p.comfort_at"),
+            ],
+        ),
+
+        "gull": (
+            initial: "Glide",
+            transitions: [
+                (from: "Glide", to: "Dive", when: "sense.prey <= p.sight"),
+                (from: "Dive", to: "Glide", when: "sense.prey > p.sight"),
+            ],
+        ),
+    },
+
+    rules: [
+        // --- the heat ---
+        (name: "vent_heat", for: "vent",
+         then: [ AddField("warmth", "p.vent_heat + pct(p.vent_boost, sense.season_warmth)") ]),
+        // Living bodies are warm; this is what lets a crowd change its own water.
+        (name: "body_heat", for: "blob",
+         then: [ SetField("warmth", r#"clamp(field("warmth") + p.body_heat, 0, p.warmth_max)"#) ]),
+
+        // --- the food ---
+        (name: "bloom", for: "algae",
+         when: "sense.warmth >= p.bloom_warmth && sense.clock % p.bloom_every == 0 && me.mass < p.algae_max",
+         then: [ Add("mass", "1") ]),
+
+        // --- the creature: its brain moves it, the marsh charges it ---
+        (name: "north", for: "blob", when: r#"sense.choice == "north""#, then: [ Move("0", "-1") ]),
+        (name: "east", for: "blob", when: r#"sense.choice == "east""#, then: [ Move("1", "0") ]),
+        (name: "south", for: "blob", when: r#"sense.choice == "south""#, then: [ Move("0", "1") ]),
+        (name: "west", for: "blob", when: r#"sense.choice == "west""#, then: [ Move("-1", "0") ]),
+
+        // Cold water costs more than warm water: this is the pressure that teaches a brain to stay near a vent.
+        (name: "burn", for: "blob",
+         then: [ Add("energy", "-p.base_cost - pct(p.cold_cost, 100 - sense.warmth)"), Add("age", "1") ]),
+        (name: "graze", for: "blob", target: NearestIn("algae", "Bloom"), when: "it.dist <= 1",
+         then: [ On(It, [ Need("mass", "1"), Add("mass", "-1") ]),
+                 Set("energy", "min(p.max_energy, me.energy + p.bite)") ]),
+        (name: "first_breath", for: "blob", when: "me.age == 0 && me.energy == 0",
+         then: [ Set("energy", "p.start_energy") ]),
+
+        // Brood when well fed; the young inherit the brain, mutated.
+        (name: "brood", for: "blob",
+         when: "me.age > 0 && me.energy >= p.birth_at && sense.crowd < p.blob_cap",
+         then: [ Add("energy", "-p.birth_cost"), Spawn("blob"), Emit("born") ]),
+
+        // Starvation, old age, or the gull.
+        (name: "perish", for: "blob",
+         when: "me.age > 0 && (me.energy <= 0 || me.age >= p.lifespan)",
+         then: [ Emit("died"), Despawn(Me) ]),
+
+        // --- the gull ---
+        (name: "gull_glide", for: "gull", state: "Glide",
+         when: "sense.clock % p.gull_stride == 0", then: [ Wander ]),
+        (name: "gull_dive", for: "gull", state: "Dive",
+         when: "sense.clock % p.gull_stride == 0 && near.blob > 0", then: [ MoveToward("blob") ]),
+        (name: "gull_take", for: "gull",
+         when: "sense.clock % p.gull_meal_stride == 0 && near.blob <= 1",
+         then: [ Despawn(Nearest("blob")), Add("taken", "1"), Emit("taken") ]),
+
+        // --- the floor: larvae drift in when the marsh is nearly empty ---
+        (name: "drift_in", for: "vent",
+         when: "sense.crowd < p.min_blobs && sense.clock % p.arrive_every == 0",
+         then: [ Spawn("blob") ]),
+    ],
+
+    actions: [],
+
+    score: "count.blob",
+
+    end: [
+        (when: "tick >= p.max_ticks", result: "endured"),
+        (when: "count.blob == 0 && tick > p.arrive_every", result: "extinct"),
+    ],
+)

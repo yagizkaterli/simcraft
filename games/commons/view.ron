@@ -1,0 +1,26 @@
+#![enable(implicit_some)]
+// Commons, seen as a 2.5D dwelling: the hall floor in front, the upper gallery stacked
+// behind it, each level one layer frame. `p` (or a click) changes which gallery is in focus.
+View(
+    theme: "dark",
+    components: {
+        "Sidebar": Rows([
+            (Fixed(7), C(name: "Series", props: (names: ["count.kin", "hearth.fuel", "hearth.kept"]))),
+            (Fixed(7), C(name: "Counts")),
+            (Fill,     C(name: "Inspector")),
+        ]),
+    },
+    layout: Rows([
+        (Fixed(1), C(name: "Title")),
+        (Fill, Cols([
+            (Percent(64), C(name: "World", props: (projection: (dim: "2.5D", perspectives: [
+                (name: "hall",      order: [1, 0], focus: 0, step: (2, -1), fade: 35, click: "gallery"),
+                (name: "gallery",   order: [1, 0], focus: 1, step: (2, -1), fade: 35, click: "hall"),
+            ])))),
+            (Fill, C(name: "Sidebar")),
+        ])),
+        (Fixed(1), C(name: "Legend")),
+        (Fixed(6), C(name: "Events", class: "calm")),
+        (Fixed(1), C(name: "Help")),
+    ]),
+)
