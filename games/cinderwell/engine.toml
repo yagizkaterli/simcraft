@@ -1,32 +1,14 @@
 # ─────────────────────────────────────────────────────────────
-#  CINDERWELL — vertical shaft / kor-culuf industrial ecology (OYUN-3)
+#  CINDERWELL — vertical shaft / kor-culuf industrial ecology
 #  Deterministic: same seed = same game.
 # ─────────────────────────────────────────────────────────────
 
 [run]
 seed = 1
-max_ticks = 500
+max_ticks = 5000
 
 [params]
-rise_cost = 3
-cool_threshold = 55
-ash_rate = 3
-draft_strength = 6
-seal_need = 12
-seal_count = 4
-heat_sip = 6
-glow_burn = 1
-shed_cost = 10
-kul_every = 2
-max_kor = 8
-max_culuf = 28
-max_kul = 24
-bottom_z = 14
-max_ticks = 500
-
-[rhai]
-max_operations = 10000
-max_call_levels = 16
+# designer defaults live in game.ron
 
 [agent]
 controllable = ["kor"]
