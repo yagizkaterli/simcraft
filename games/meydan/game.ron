@@ -1,0 +1,170 @@
+#![enable(implicit_some)]
+// Meydan — a public square, the town's shared place (an original social world).
+//
+//   Neighbours ('komşu') live around one square. Nobody owns the square: it is kept
+//   alive by whoever is there. Three communal loops, all decided by proximity, not by menus:
+//     · the hearth burns only while neighbours feed it firewood; its glow warms whoever stands near it
+//     · warmth lifts a neighbour's mood; standing away from the fire slowly chills them
+//     · every neighbour may greet the others (renown), gift a token (renown + the other's mood)
+//       and carry firewood to the monument until the town's shared project is finished (a festival)
+//   A grove regrows firewood; a stall trades firewood for tokens.
+//
+//   Score: what a neighbour is worth to the square — renown, mood, tokens, and the monument they built together.
+//   Two seats (alice, bob) share the same square: what one feeds, the other feels.
+//
+//   No physics, no names, no pictures borrowed from any game: the whole world is this file.
+Game(
+    name: "meydan",
+    perception: Senses,
+
+    kinds: {
+        "wall":     (glyph: '#', solid: true),
+
+        // The communal fire. It has no owner: it lives on the firewood left at its feet.
+        "hearth":   (glyph: 'H', solid: true,
+                     props: { "fuel": 30 },
+                     senses: { "clock": "tick" }),
+
+        // A neighbour — the player's avatar. `owner` ties it to a seat.
+        "neighbor": (glyph: '@', solid: true, fsm: "neighbor",
+                     props: { "owner": 0, "warmth": 50, "mood": 50, "renown": 0, "wood": 0, "token": 0 },
+                     // What a neighbour knows about the square: only what the body feels.
+                     // The hearth is felt within two cells; a crowd is the neighbours around you.
+                     senses: { "hearth_near": r#"if near.hearth <= 2 { 1 } else { 0 }"#,
+                               "crowd": r#"around("neighbor", 1)"# }),
+
+        // Where firewood comes back. It keeps the square alive, so the loop never runs dry.
+        "grove":    (glyph: 'g', solid: true,
+                     props: { "wood": 2 }),
+
+        // The stall trades firewood for tokens: the quiet part of the square.
+        "stall":    (glyph: 'S', solid: true,
+                     props: { "stock": 8, "price": 2 }),
+
+        "well":     (glyph: 'W', solid: true),
+        "bench":    (glyph: 'b', solid: true),
+
+        // The monument: the town's shared project. No one owns it; everyone builds it.
+        "monument": (glyph: 'M', solid: true,
+                     props: { "built": 0 }),
+    },
+
+    params: {
+        "days": 240,             // the square lives this long
+        "carry_max": 3,          // firewood one neighbour can carry
+        "warm_max": 100,         // warmth a body can hold
+        "warm_gain": 4,          // warmth taken near the hearth
+        "chill_loss": 1,         // warmth lost away from it
+        "fuel_per_wood": 6,      // ticks of fire one log buys
+        "grove_max": 4,          // logs a grove holds
+        "grow_every": 5,         // one log regrows this often
+        "monument_goal": 12,     // logs the monument needs before the festival
+        "gather_every": 4,       // how often a gathered square emits its "gathering"
+        "greet_dist": 2,         // how close a greeting lands
+    },
+
+    layout: (
+        legend: { '#': "wall", 'H': "hearth", 'g': "grove", 'S': "stall", 'W': "well",
+                  'b': "bench", 'M': "monument",
+                  'A': ("neighbor", { "owner": 1 }),
+                  'B': ("neighbor", { "owner": 2 }) },
+        rows: [
+            "###########",
+            "#g.......g#",
+            "#..b...b..#",
+            "#....H....#",
+            "#.S.....W.#",
+            "#A.......B#",
+            "#....M....#",
+            "###########",
+        ],
+    ),
+
+    fsms: {
+        // A neighbour is either alone or in a gathering; the square decides which.
+        "neighbor": (
+            initial: "Alone",
+            transitions: [
+                (from: "Alone",    to: "Gathered", when: "sense.crowd >= 1"),
+                (from: "Gathered", to: "Alone",    when: "sense.crowd == 0"),
+            ],
+            states: {
+                "Alone": (),
+                // Being among others is the point: the square emits its own occasion.
+                "Gathered": (rules: [
+                    (name: "gathering", when: "pace(p.gather_every)", then: [ Emit("gathering") ]),
+                ]),
+            },
+        ),
+    },
+
+    rules: [
+        // --- The hearth gives, and can go out ---
+        (name: "burn", for: "hearth",
+         when: "me.fuel > 0",
+         then: [ Add("fuel", "-1") ]),
+        (name: "hearth_out", for: "hearth",
+         when: "me.fuel == 0",
+         then: [ Emit("hearth_out") ]),
+
+        // --- Warmth follows the fire; mood follows warmth ---
+        (name: "warm_by_hearth", for: "neighbor",
+         when: "sense.hearth_near == 1 && me.warmth < p.warm_max",
+         then: [ Add("warmth", "p.warm_gain") ]),
+        (name: "chill_away", for: "neighbor",
+         when: "sense.hearth_near == 0 && me.warmth > 0",
+         then: [ Add("warmth", "-p.chill_loss") ]),
+        (name: "mood_rises", for: "neighbor",
+         when: "me.mood < me.warmth",
+         then: [ Add("mood", "1") ]),
+        (name: "mood_falls", for: "neighbor",
+         when: "me.mood > me.warmth",
+         then: [ Add("mood", "-1") ]),
+
+        // --- The square's own life ---
+        (name: "grow", for: "grove",
+         when: "pace(p.grow_every) && me.wood < p.grove_max",
+         then: [ Add("wood", "1") ]),
+        (name: "festival", for: "monument",
+         when: "me.built >= p.monument_goal",
+         then: [ Emit("festival") ]),
+    ],
+
+    // What a neighbour may do. Every one of these is a decision about the shared square.
+    actions: [
+        (name: "gather", for: "neighbor", target: Nearest("grove"),
+         when: "me.wood < p.carry_max && it.wood > 0",
+         then: [ MoveToward("grove"), On(It, [ Add("wood", "-1") ]), Add("wood", "1") ]),
+
+        (name: "feed_hearth", for: "neighbor", target: Nearest("hearth"),
+         when: "me.wood > 0",
+         then: [ MoveToward("hearth"), Add("wood", "-1"),
+                 On(It, [ Add("fuel", "p.fuel_per_wood") ]), Emit("fed") ]),
+
+        (name: "greet", for: "neighbor", target: Nearest("neighbor"),
+         when: "it.dist <= p.greet_dist",
+         then: [ Add("renown", "1"), On(It, [ Add("renown", "1") ]), Emit("greet") ]),
+
+        (name: "gift", for: "neighbor", target: Nearest("neighbor"),
+         when: "me.token > 0 && it.dist <= p.greet_dist",
+         then: [ Need("token", "1"), Add("token", "-1"),
+                 On(It, [ Add("mood", "2") ]), Add("renown", "2"), Emit("gift") ]),
+
+        (name: "trade", for: "neighbor", target: Nearest("stall"),
+         when: "me.wood > 0",
+         then: [ Add("wood", "-1"), Add("token", "it.price"),
+                 On(It, [ Need("stock", "1"), Add("stock", "-1") ]) ]),
+
+        (name: "contribute", for: "neighbor", target: Nearest("monument"),
+         when: "me.wood > 0",
+         then: [ MoveToward("monument"), Add("wood", "-1"),
+                 On(It, [ Add("built", "1") ]), Emit("contributed") ]),
+    ],
+
+    // What a neighbour is worth to the square, plus the monument the square built together.
+    score: "me.renown * 2 + me.mood + me.token * 3 + count.monument * 4",
+
+    end: [
+        (when: "tick >= p.days", result: "time"),
+    ],
+)

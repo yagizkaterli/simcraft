@@ -1,0 +1,48 @@
+[run]
+seed = 7
+max_ticks = 400
+
+[switches]
+hearth_emit = true
+hearth_fuel = true
+hearth_tended = true
+arrivals = true
+kin_age = true
+kin_spirit_decay = true
+kin_warm = true
+kin_cold = true
+kin_company = true
+kin_crowded = true
+kin_seek_warmth = true
+kin_seek_company = true
+kin_restless = true
+kin_crowd_away = true
+kin_stroll = true
+kin_leave = true
+stoke = true
+
+[params]
+spirit_max = 20
+spirit_decay = 1
+warm_gain = 2
+cold_loss = 1
+company_gain = 1
+crowd_at = 4
+crowd_loss = 1
+seek_below = 8
+content_at = 14
+withdraw_at = 3
+hearth_burn = 160
+fuel_decay = 1
+tend_radius = 2
+tend_gain = 2
+arrive_every = 10
+max_kin = 40
+ticks = 400
+
+[agent]
+controllable = ["hearth"]
+
+[rhai]
+max_operations = 10000
+max_call_levels = 16

@@ -1,0 +1,27 @@
+# ─────────────────────────────────────────────────────────────
+#  STEAM ENGINE — operator panel (emberfen)
+#  The marsh is cold; only the vents are warm, and winter closes even those down.
+#  Watch the blob brains learn where to be: the population's behaviour drifts with the seasons.
+# ─────────────────────────────────────────────────────────────
+
+[run]
+seed = 1
+max_ticks = 3000
+
+[world]
+width = 32
+height = 15
+
+# Hyperparameters — override the `params` defaults in game.ron.
+# Only the ones an operator would turn while watching: how hot the vents run, and how the year is spent.
+[params]
+vent_heat = 1800
+vent_boost = 1200
+bloom_every = 3
+bite = 20
+birth_at = 100
+
+# Safety valve — the most operations a single expression/script may perform.
+[rhai]
+max_operations = 10000
+max_call_levels = 16
