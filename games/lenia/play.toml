@@ -1,0 +1,15 @@
+# Minimal Lenia panel: one autonomous glider, continuous run.
+[run]
+seed = 7
+max_ticks = 12000
+tick_rate = 30
+
+[world]
+width = 48
+height = 1
+
+[switches]
+glider_drift = true
+
+[agent]
+controllable = []

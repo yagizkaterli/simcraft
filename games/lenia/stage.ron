@@ -1,0 +1,18 @@
+#![enable(implicit_some)]
+// Lenia's living cell on an open, soil-free stage.
+Stage(
+    assets: ["nature_hd"],
+    cells_across: 56.0,
+    horizon: 0.50,
+    plane: 0,
+    row_depth: 0.0,
+    follow: "",
+    sky: "sky",
+    layers: [],
+    soil: (image: "sky", scale: 1000.0, hollow: "hollow", darken: 0),
+    kinds: {
+        "glider": (frames: ["berry"], height: 1.4, bob: 0.025, fps: 8.0),
+    },
+    buttons: [],
+    vignette: 12,
+)

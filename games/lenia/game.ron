@@ -1,0 +1,33 @@
+#![enable(implicit_some)]
+// Lenia — minimal single-channel, continuously moving life form.
+// One deterministic glider explores a bounded open lane; no soil or ants.
+Game(
+    name: "lenia",
+    perception: Direct,
+
+    kinds: {
+        "glider": (glyph: '●', solid: true, fsm: "glider",
+                   glyphs: { "Drifting": '●' }),
+    },
+
+    params: {},
+
+    layout: (
+        legend: { 'g': "glider" },
+        rows: ["........................g......................."],
+    ),
+
+    fsms: {
+        "glider": (
+            initial: "Drifting",
+            states: { "Drifting": () },
+            transitions: [],
+        ),
+    },
+
+    rules: [
+        (name: "glider_drift", for: "glider", then: [ Wander ]),
+    ],
+
+    actions: [],
+)
