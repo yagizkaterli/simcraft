@@ -1,0 +1,31 @@
+#![enable(implicit_some)]
+// CINDERWELL: side-view vertical shaft on the HD stage.
+// World levels are depth (z); one row per level (y=0). Camera on the cross-section.
+Stage(
+    assets: ["nature_hd"],
+    cells_across: 13.0,
+    horizon: 0.16,
+    plane: 0,
+    row_depth: 0.04,
+    follow: "kor",
+    sky: "sky",
+    layers: [
+        (image: "mountains",   depth: 30.0, height: 50.0, haze: 40, blur: 1.0),
+        (image: "forest",      depth: 12.0, height: 14.0, haze: 20, blur: 0.5),
+        (image: "meadow",      depth: 4.0,  height: 3.6,  haze: 6,  lift: -0.05),
+        (image: "grass_front", depth: 1.0,  height: 0.28, lift: -0.08, offset: 5.0),
+        (image: "grass_front", depth: 0.55, height: 0.5,  lift: -0.10, front: true, blur: 1.6, opacity: 0.95),
+    ],
+    soil: (image: "soil", scale: 4.0, hollow: "hollow", darken: 55),
+    kinds: {
+        // nature_hd stand-ins (no dedicated cinder sprites yet).
+        "kor":   (frames: ["mound"], height: 0.5, bob: 0.008, fps: 8.0),
+        "kul":   (frames: ["berry"], height: 0.22, bob: 0.014, fps: 12.0),
+        "culuf": (frames: ["granary"], height: 0.38),
+    },
+    buttons: [
+        (action: "fan_draft",  on: "kor", icon: "btn_rally", key: "1", at: (0.07, 0.87)),
+        (action: "stoke_heat", on: "kor", icon: "btn_warm",  key: "2", at: (0.165, 0.87)),
+    ],
+    vignette: 36,
+)

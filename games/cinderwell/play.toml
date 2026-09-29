@@ -1,0 +1,16 @@
+# PLAYER PANEL (cinderwell) — simcraft-play. Evals keep engine.toml.
+
+[run]
+seed = 1
+max_ticks = 500
+
+[params]
+rise_cost = 3
+cool_threshold = 55
+draft_strength = 6
+seal_need = 12
+seal_count = 4
+max_ticks = 500
+
+[agent]
+controllable = ["kor"]
