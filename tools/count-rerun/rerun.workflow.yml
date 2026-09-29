@@ -1,0 +1,59 @@
+name: count-rerun
+
+# HRK-046: PR govdesindeki komutlari pinned head_sha'da kosar, re-run.csv + re-run.md uretir.
+# Public satirlar burada tek tikla izlenir; private satirlar kendi runner'imizda ayni binary ile kosar.
+
+on:
+  workflow_dispatch:
+    inputs:
+      input:
+        description: "Girdi JSON yolu (public satirlar)"
+        required: false
+        default: "tools/count-rerun/son20-public.json"
+      prefix:
+        description: "Cikti oneki"
+        required: false
+        default: "re-run"
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  rerun:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Build count-rerun
+        run: |
+          cd tools/count-rerun
+          go vet ./...
+          go build -o "$RUNNER_TEMP/count-rerun" .
+
+      - name: Run count-rerun (public rows)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          COUNTRERUN_PRIVATE: skip
+        run: |
+          "$RUNNER_TEMP/count-rerun" "${{ inputs.input }}" "${{ inputs.prefix }}"
+
+      - name: Upload re-run artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: re-run
+          path: |
+            ${{ inputs.prefix }}.csv
+            ${{ inputs.prefix }}.md
+            ${{ inputs.prefix }}-out/
+          if-no-files-found: warn
