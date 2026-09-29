@@ -1,0 +1,35 @@
+{
+  "schema": "pca-siparis-kapsulu-v1",
+  "is_id": "SIMCRAFT-TERMIT-MOUND-LANES-001",
+  "goal": "implement",
+  "baslik": "Simcraft unit görevi: thermit mound (yeni oyun) + lanes araba oyunu geliştirme",
+  "amac": "1) 'thermit mound' (termit tepesi) oyununu simcraft formatinda sifirdan yaz. 2) 'lanes' araba oyununu gelistir (kontrol, hiz, carpisma, coin). 3) 2.5D/3D gosterim icin koloni3d'deki view/yorengi desenlerini kullanabilirsin.",
+  "neden": [
+    "Yagiz direktifi 2026-09-29: unit canlandirildi (1 uye), kapsul verildi.",
+    "Oyun ceciligi: 18 oyun var, termit mound yok; lanes mevcut ama ham (track.ron var, kontrol/2.5D isi acik).",
+    "commit cfec20d 'unit(wF): 9 ozgun simcraft oyunu' ile ayni unit hatti."
+  ],
+  "yol": [
+    "1 once mevcut kalibi oku: games/forge (FSM+props), games/colony3d (stage/view/3D), crates/sim-rules, crates/sim-state.",
+    "2 TERMIT MOUND: kind'lar (isci/asker termit, oda, tunel, mantar bahcesi, kralice) + en az 1 FSM (ornek: isci: kaz->tasit->bahce->besle) + props (gida, nem, koloni nufusu).",
+    "3 LANES: araba kontrolu (hiz, yon, dashing), barrier carpismasi, coin toplama, skor; track.ron tabanli.",
+    "4 kanit karesi: `simcraft-view games/<ad> --dump 30 --size 40x18` rc=0 ve anlamli kare.",
+    "5 dal + commit + kendi dalindan PR (main'e direkt push YASAK)."
+  ],
+  "kabul": [
+    "games/thermit_mound/ icinde game.ron + engine.toml (veya ad birebir 'thermit-mound').",
+    "games/lanes/ mevcut dosyalari temel alir, yeni yetenek ekler (mevcut oyunlar bozulmaz).",
+    "--dump 30 rc=0, harita ve olay paneli anlamli.",
+    "deterministik: ayni seed -> ayni kare (no_float/only_i64 kuralina uy).",
+    "terminal glyph'leri: mevcut oyunlardaki gibi ASCII sinifi."
+  ],
+  "kisit": [
+    "Format disi dosya yok; rhai kurallari no_float + only_i64.",
+    "pollen_drift'in initial_bloom hatasina dokunma (ayri is).",
+    "main'e push YASAK; PR hatti kullan.",
+    "2.5D/3D: crates/sim-render projection ve games/colony3d/views desenlerini kopyala, yeni cekirdek API'si uretme."
+  ],
+  "falsifier": "GOREV BASARISIZ: (a) --dump calismaz veya rc!=0, (b) format disi dosya eklenirse, (c) mevcut oyunlardan biri bozulursa, (d) main'e direkt push yapilirsa.",
+  "yazan": "kurator (herakles-harness oturumu)",
+  "ts": "2026-09-29T02:40:00Z"
+}
