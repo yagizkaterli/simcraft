@@ -1,0 +1,179 @@
+#![enable(implicit_some)]
+// Cache — squirrels hiding nuts for winter.
+//   Squirrels gather nuts from trees and hide them in caches.
+//   A squirrel knows its own caches but may stumble upon another's.
+//   Winter arrives after a set time: nuts on the ground rot, trees stop
+//   producing, and squirrels must live off their caches. A squirrel
+//   without enough nuts starves. Theft creates a tension between
+//   hoarding and defending.
+// Score: nuts remaining in a squirrel's caches at the end.
+Game(
+    name: "cache",
+    perception: Direct,
+
+    kinds: {
+        "tree":    (glyph: 'T', solid: true, fsm: "tree",
+                    props: { "nuts": 5, "max_nuts": 8 },
+                    glyphs: { "Bearing": 'T', "Bare": 't' }),
+        "squirrel": (glyph: 'S', solid: true, fsm: "squirrel",
+                     props: { "carrying": 0, "age": 0, "food": 3,
+                              "hx": 0, "hy": 0, "cache_count": 0, "stolen": 0 },
+                     glyphs: { "Forage": 's', "Carry": 'S', "Cache": 'C',
+                               "Steal": '!', "Hibernate": 'z' }),
+        "nut":     (glyph: 'n', solid: false,
+                    props: { "age": 0 }),
+        "cache_pile": (glyph: 'c', solid: false,
+                       props: { "nuts": 0 }),
+    },
+
+    params: {
+        "nut_grow_every": 8,       // ticks between nut spawns from a tree
+        "nut_rot_age": 40,         // ticks before a dropped nut rots
+        "winter_at": 150,          // tick when winter starts
+        "winter_length": 80,       // ticks of winter
+        "winter_food_per_tick": 1, // nuts consumed per tick in winter
+        "forage_range": 5,         // max distance squirrel roams from home
+        "cache_nuts_needed": 5,    // nuts needed to create a cache
+        "steal_chance": 30,        // % chance to steal from found cache
+        "max_squirrels": 6,
+        "max_caches": 20,
+        "max_nuts": 40,
+        "ticks": 300,
+    },
+
+    layout: (
+        legend: { 'T': "tree",
+                  'S': ("squirrel", { "hx": 10, "hy": 4 }),
+                  's': ("squirrel", { "hx": 18, "hy": 4 }) },
+        rows: [
+            "..............................",
+            "..T.................T.........",
+            "..............................",
+            "..............................",
+            "..........S...s..............",
+            "..............................",
+            "..............................",
+            "..T.................T.........",
+            "..............................",
+            "..............................",
+            "..............................",
+            "..T.................T.........",
+            "..............................",
+            "..............................",
+            "..............................",
+            "..T.................T.........",
+            "..............................",
+        ],
+    ),
+
+    fsms: {
+        "tree": (
+            initial: "Bearing",
+            states: { "Bearing": (), "Bare": () },
+            transitions: [
+                (from: "Bearing", to: "Bare", when: "me.nuts <= 0"),
+                (from: "Bare",    to: "Bearing", when: "me.nuts >= me.max_nuts / 2"),
+            ],
+        ),
+        "squirrel": (
+            initial: "Forage",
+            states: {
+                "Forage": (),
+                "Carry": (),
+                "Cache": (),
+                "Steal": (),
+                "Hibernate": (),
+            },
+            transitions: [
+                (from: "Forage",  to: "Carry",  when: "me.carrying > 0"),
+                (from: "Carry",   to: "Cache",  when: r#"me.carrying >= p.cache_nuts_needed && me.cache_count < p.max_caches"#),
+                (from: "Carry",   to: "Forage", when: "me.carrying == 0"),
+                (from: "Cache",   to: "Forage", when: "me.carrying == 0"),
+                (from: "Steal",   to: "Forage", when: "me.carrying == 0"),
+                (from: "Forage",  to: "Steal",
+                 when: r#"around("cache_pile", 1) > 0 && roll < p.steal_chance"#),
+                (from: "Forage",  to: "Hibernate",
+                 when: "tick >= p.winter_at"),
+                (from: "Hibernate", to: "Forage",
+                 when: "tick >= p.winter_at + p.winter_length"),
+            ],
+        ),
+    },
+
+    rules: [
+        // --- trees ---
+        (name: "tree_grow", for: "tree", state: "Bearing",
+         when: r#"tick % p.nut_grow_every == 0 && me.nuts < me.max_nuts && count.nut < p.max_nuts"#,
+         then: [ Add("nuts", "1"), Spawn("nut"), Emit("nut_fall") ]),
+        (name: "tree_recover", for: "tree", state: "Bare",
+         when: r#"tick % p.nut_grow_every == 0"#,
+         then: [ Add("nuts", "1") ]),
+
+        // --- nuts ---
+        (name: "nut_rot", for: "nut",
+         when: "me.age >= p.nut_rot_age || tick >= p.winter_at",
+         then: [ Despawn(Me), Emit("nut_rot") ]),
+        (name: "nut_age", for: "nut", then: [ Add("age", "1") ]),
+
+        // --- squirrels ---
+        (name: "squirrel_age", for: "squirrel", then: [ Add("age", "1") ]),
+
+        // Forage: look for nuts on the ground.
+        (name: "squirrel_forage", for: "squirrel", state: "Forage",
+         when: r#"near.nut > 0 && near.nut <= p.forage_range"#,
+         then: [ MoveToward("nut") ]),
+        (name: "squirrel_pickup", for: "squirrel", state: "Forage",
+         when: r#"around("nut", 0) > 0 && me.carrying < p.cache_nuts_needed"#,
+         then: [ Despawn(Nearest("nut")), Add("carrying", "1"), Goto("Carry"), Emit("pickup") ]),
+
+        // Carry: head home.
+        (name: "squirrel_carry_home", for: "squirrel", state: "Carry",
+         when: "me.x != me.hx || me.y != me.hy",
+         then: [ Move("if me.hx > me.x { 1 } else if me.hx < me.x { -1 } else { 0 }",
+                      "if me.hy > me.y { 1 } else if me.hy < me.y { -1 } else { 0 }") ]),
+        // If home, try to cache.
+        (name: "squirrel_cache", for: "squirrel", state: "Carry",
+         when: "me.x == me.hx && me.y == me.hy",
+         then: [ Goto("Cache") ]),
+
+        // Cache: drop nuts into a cache pile.
+        (name: "squirrel_deposit", for: "squirrel", state: "Cache",
+         when: r#"around("cache_pile", 0) > 0"#,
+         then: [ On(Nearest("cache_pile"), [ Add("nuts", "1") ]),
+                 Add("carrying", "-1"), Emit("deposit") ]),
+        (name: "squirrel_new_cache", for: "squirrel", state: "Cache",
+         when: r#"around("cache_pile", 0) == 0 && me.cache_count < p.max_caches"#,
+         then: [ Spawn("cache_pile"), Add("carrying", "-1"),
+                 Add("cache_count", "1"), Emit("new_cache") ]),
+
+        // Steal from a cache.
+        (name: "squirrel_steal", for: "squirrel", state: "Steal",
+         target: Nearest("cache_pile"), when: "it.dist <= 1 && it.nuts > 0",
+         then: [ On(It, [ Add("nuts", "-1") ]),
+                 Add("carrying", "1"), Add("stolen", "1"), Emit("steal") ]),
+
+        // Winter: consume from nearest cache.
+        (name: "squirrel_winter_eat", for: "squirrel", state: "Hibernate",
+         target: Nearest("cache_pile"), when: "it.dist <= 1 && it.nuts > 0 && tick % 2 == 0",
+         then: [ On(It, [ Add("nuts", "-1") ]), Add("food", "1"), Emit("eat_cache") ]),
+        (name: "squirrel_winter_move", for: "squirrel", state: "Hibernate",
+         target: Nearest("cache_pile"),
+         then: [ MoveToward("cache_pile") ]),
+        (name: "squirrel_starve", for: "squirrel",
+         when: "tick >= p.winter_at && me.food <= 0",
+         then: [ Despawn(Me), Emit("starve") ]),
+
+        // Empty cache disappears.
+        (name: "cache_empty", for: "cache_pile",
+         when: "me.nuts <= 0",
+         then: [ Despawn(Me) ]),
+    ],
+
+    end: [
+        (when: "tick >= p.winter_at + p.winter_length", result: "spring"),
+        (when: "count.squirrel == 0", result: "extinct"),
+        (when: "tick >= p.ticks", result: "time"),
+    ],
+
+    score: r#"me.cache_count * 5 + count.nut"#,
+)

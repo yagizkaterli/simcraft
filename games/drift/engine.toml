@@ -1,0 +1,34 @@
+[run]
+seed = 99
+max_ticks = 300
+
+[world]
+width = 20
+height = 11
+
+[spawn]
+plankton = 5
+predator = 0
+
+[switches]
+plankton_age = true
+plankton_drift = true
+plankton_bloom = true
+predator_hunt = true
+predator_eat = true
+predator_starve = true
+
+[params]
+drift_chance = 30
+bloom_chance = 5
+bloom_depth = 3
+breed_chance = 2
+max_ticks = 300
+
+[rhai]
+max_operations = 10000
+max_call_levels = 16
+
+[agent]
+controllable = ["vessel"]
+observe_radius = 5

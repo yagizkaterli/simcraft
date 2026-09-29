@@ -1,0 +1,19 @@
+# ─────────────────────────────────────────────────────────────
+#  KOK — root organism simulation operator panel
+#  Deterministic: same seed = same game. Watch how deep the Kok grows.
+# ─────────────────────────────────────────────────────────────
+
+[run]
+seed = 1
+max_ticks = 5000
+
+[params]
+# growth_cost = 12
+# sivri_cost = 2
+# nutrient_threshold = 14
+# branch_every = 3
+# dugum_yield = 6
+# passive_absorb = 2
+# sivri_max_reach = 5
+# max_sivri = 16
+# max_ticks = 800

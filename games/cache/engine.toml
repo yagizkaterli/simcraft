@@ -1,0 +1,45 @@
+[run]
+seed = 42
+max_ticks = 300
+
+[world]
+width = 30
+height = 17
+
+[spawn]
+nut = 10
+
+[switches]
+tree_grow = true
+tree_recover = true
+nut_rot = true
+nut_age = true
+squirrel_age = true
+squirrel_forage = true
+squirrel_pickup = true
+squirrel_carry_home = true
+squirrel_cache = true
+squirrel_deposit = true
+squirrel_new_cache = true
+squirrel_steal = true
+squirrel_winter_eat = true
+squirrel_winter_move = true
+squirrel_starve = true
+cache_empty = true
+
+[params]
+nut_grow_every = 8
+nut_rot_age = 40
+winter_at = 150
+winter_length = 80
+forage_range = 5
+cache_nuts_needed = 5
+steal_chance = 30
+max_squirrels = 6
+max_caches = 20
+max_nuts = 40
+ticks = 300
+
+[rhai]
+max_operations = 10000
+max_call_levels = 16

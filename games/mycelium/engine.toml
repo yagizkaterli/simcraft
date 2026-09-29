@@ -1,0 +1,37 @@
+[run]
+seed = 7
+max_ticks = 500
+
+[world]
+width = 32
+height = 15
+
+[spawn]
+food = 6
+mycelium = 2
+
+[switches]
+mycelium_age = true
+wander = true
+consume = true
+food_depleted = true
+food_empty = true
+spawn_runner = true
+starvation = true
+fruit_spawn = true
+
+[params]
+wander_chance = 30
+spawn_fed_threshold = 3
+spawn_chance = 25
+consume_rate = 1
+fruit_threshold = 6
+fruit_interval = 10
+starvation_ticks = 30
+
+[rhai]
+max_operations = 10000
+max_call_levels = 16
+
+[agent]
+controllable = []

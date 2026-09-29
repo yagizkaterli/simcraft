@@ -1,0 +1,106 @@
+#![enable(implicit_some)]
+// Mycelium — fungal network growth simulation.
+// Mycelium wanders through soil, consumes food sources, and fruits when mature.
+// Well-fed mycelium spawns new runners that explore outward.
+// Emergent network patterns as runners find and consume nutrients.
+Game(
+    name: "mycelium",
+    perception: Direct,
+
+    kinds: {
+        "food":   (glyph: '%', solid: true, props: { "amount": 6 }),
+        "mycelium": (glyph: 'm', fsm: "mycelium",
+                     props: { "age": 0, "fed": 0 },
+                     glyphs: { "Growing": 'm', "Fruiting": 'M' }),
+        "fruit":  (glyph: '*'),
+    },
+
+    params: {
+        "wander_chance": 30,
+        "spawn_fed_threshold": 3,
+        "spawn_chance": 25,
+        "consume_rate": 1,
+        "fruit_threshold": 6,
+        "fruit_interval": 10,
+        "starvation_ticks": 30,
+        "max_ticks": 500,
+    },
+
+    layout: (
+        legend: { '%': "food", 'm': "mycelium" },
+        rows: [
+            "................................",
+            "..%...............%.............",
+            "................................",
+            "................................",
+            "..........m.....................",
+            "................................",
+            "................................",
+            "..%...............%.............",
+            "................................",
+            "................................",
+            "..........m.....................",
+            "................................",
+            "................................",
+            "..%...............%.............",
+            "................................",
+        ],
+    ),
+
+    fsms: {
+        "mycelium": (
+            initial: "Growing",
+            states: {
+                "Growing": (),
+                "Fruiting": (enter: [ Emit("fruit_spawn") ]),
+            },
+            transitions: [
+                (from: "Growing", to: "Fruiting", when: "me.fed >= p.fruit_threshold"),
+                (from: "Fruiting", to: "Growing", when: "me.fed < p.fruit_threshold"),
+            ],
+        ),
+    },
+
+    rules: [
+        (name: "mycelium_age", for: "mycelium", then: [ Add("age", "1") ]),
+
+        // Wander to explore new territory.
+        (name: "wander", for: "mycelium", state: "Growing",
+         when: "roll < p.wander_chance",
+         then: [ Wander ]),
+
+        // Consume adjacent food.
+        (name: "consume", for: "mycelium",
+         when: r#"around("food", 1) > 0"#,
+         then: [ Add("fed", "p.consume_rate") ]),
+        (name: "food_depleted", for: "food",
+         when: r#"around("mycelium", 1) > 0"#,
+         then: [ Add("amount", "-1") ]),
+        (name: "food_empty", for: "food", when: "me.amount <= 0",
+         then: [ Despawn(Me) ]),
+
+        // Well-fed mycelium spawns a new runner (at same position).
+        (name: "spawn_runner", for: "mycelium", state: "Growing",
+         when: r#"me.fed >= p.spawn_fed_threshold && roll < p.spawn_chance"#,
+         then: [ Spawn("mycelium"), Add("fed", "-p.spawn_fed_threshold") ]),
+
+        // Starvation: mycelium with no food nearby dies.
+        (name: "starvation", for: "mycelium",
+         when: r#"me.age >= p.starvation_ticks && me.fed == 0"#,
+         then: [ Emit("starved"), Despawn(Me) ]),
+
+        // Fruiting mycelium spawns a fruit.
+        (name: "fruit_spawn", for: "mycelium", state: "Fruiting",
+         when: "tick % p.fruit_interval == 0",
+         then: [ Spawn("fruit"), Add("fed", "-p.fruit_threshold"), Emit("fruited") ]),
+    ],
+
+    actions: [],
+
+    score: "count.fruit",
+
+    end: [
+        (when: "count.food == 0", result: "depleted"),
+        (when: "tick >= p.max_ticks", result: "stable"),
+    ],
+)

@@ -1,0 +1,14 @@
+# ─────────────────────────────────────────────────────────────
+#  PLAYER PANEL (kok) — what `simcraft-play` runs. Evals and tests keep engine.toml.
+#  Side-view root organism: grow Kok downward through soil layers, branch Sivri, form Dugum.
+# ─────────────────────────────────────────────────────────────
+
+[run]
+seed = 1
+max_ticks = 5000
+
+[params]
+# leave designer defaults unless tuning a play session
+
+[agent]
+controllable = ["kok"]

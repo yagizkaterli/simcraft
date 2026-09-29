@@ -1,0 +1,21 @@
+# ─────────────────────────────────────────────────────────────
+#  STEAM ENGINE — operator panel for conveyor
+# ─────────────────────────────────────────────────────────────
+
+[run]
+seed = 42
+max_ticks = 300
+
+[world]
+width = 36
+height = 7
+
+[params]
+spawn_interval = 8
+work_ticks = 4
+max_ticks = 300
+
+# Safety valve
+[rhai]
+max_operations = 10000
+max_call_levels = 16

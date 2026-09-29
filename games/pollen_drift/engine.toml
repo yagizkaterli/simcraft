@@ -1,0 +1,25 @@
+# ─────────────────────────────────────────────────────────────
+#  STEAM ENGINE — operator panel (pollen_drift)
+# ─────────────────────────────────────────────────────────────
+
+[run]
+seed = 42
+max_ticks = 500
+
+[world]
+width = 32
+height = 20
+
+[switches]
+age_nonbarren = true
+set_colour = true
+initial_bloom = true
+
+[params]
+spread_chance = 100
+bloom_at = 6
+inherit_chance = 65
+
+[rhai]
+max_operations = 10000
+max_call_levels = 16

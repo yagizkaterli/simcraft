@@ -1,0 +1,42 @@
+{
+  "schema": "pca-siparis-kapsulu-v1",
+  "is_id": "SIMCRAFT-UNIT-DEVIR-2.5D-3D-001",
+  "goal": "implement",
+  "baslik": "Simcraft unit devir: 2.5D/3D oynanabilirlik simcraft ile yapilacak",
+  "amac": "2.5D/3D oyunlari simcraft kendi renderer'iyla oynanir/kanitlanir hale getir. Unit (wF, uye omp @ wF:p2) bu kapsulu devraldi; sim-gpu HD 2.5D renderer + colony3d 3D + lanes first-person araba hatti islenecek.",
+  "neden": [
+    "Yagiz karari 2026-09-29: 'bizim yaptigimiz 2.5/3D oyun' simcraft ile yapilacak; ayri motor/film hatti degil.",
+    "Araclar ZATEN kodda: crates/sim-gpu = wgpu HD 2.5D renderer (stage katmanlari, sprite, toprak kesiti); simcraft-play window/--shot/--record/--bench; first-person = track.ron (lanes).",
+    "Terminal 3D hazir: colony3d 2D+2x3D projeksiyon coklu-view paneli (diorama/layers/generated)."
+  ],
+  "son_pushlar_kanit": [
+    "dal: unit/wf-games-20260929 @ 3772fb2 (origin/yagizkaterli/simcraft), upstream YOK.",
+    "PR: yagizkaterli/simcraft#1 ACIK (base main, 2 commit: cfec20d 9 oyun + 3772fb2 kapsul).",
+    "cemphlvn/simcraft: main @ c4c9c3e7; bizim upstream PR yok (refs/pull/1/head = apelann, ilgisiz).",
+    "VPS binary'ler: simcraft-play/simcraft-check/simcraft-import derlendi (sccache)."
+  ],
+  "yol": [
+    "1 REPO: /root/repos/simcraft, dal unit/wf-games-20260929'e gec; calisma burada (firstmate cwd'si degil).",
+    "2 KANIT 2.5D: simcraft-play games/colony3d --shot cikti.png --size 1280x720 --ticks 40 (headless lavapipe olur); kamera close/wide/nest denemeleri.",
+    "3 FIRST-PERSON: games/lanes (track.ron) ile simcraft-play games/lanes --record kosusu; runs/*.jsonl kaydi + --shot kareler.",
+    "4 TERMIT MOUND (CEM'IN OYUNU): games/mound cem/main'de mevcut (9693211, first-person termit, 3D glb + term.rs). `git fetch cem`, devral + gelistir; SIFIRDAN YAZMA. Detay: TASK-TERMIT-MOUND-LANES-001.",
+    "5 LANES GELISTIRME: kontrol, hiz, carpisma, coin, skor (mevcut track.ron uzerinden).",
+    "6 HER SEY dalinda commit + PR hatti (main'e push YASAK)."
+  ],
+  "kabul": [
+    "simcraft-play --shot rc=0 ve PNG uretir (2.5D goruntu kaniti).",
+    "First-person lanes kosusu record edilir (runs/*.jsonl) ve kare kaniti verilir.",
+    "thermit_mound oyunu --dump 30 rc=0, anlamli harita+olay paneli.",
+    "Deterministik: ayni seed -> ayni kare (no_float/only_i64).",
+    "Mevcut 17 oyun bozulmaz (git diff ile dogrulanir)."
+  ],
+  "kisit": [
+    "Format disi dosya eklenmez; yeni cekirdek API'si uretilmez (mevcut sim-core/sim-gpu yetiyor).",
+    "pollen_drift initial_bloom hatali — bu gorevde DOKUNMA (ayri is).",
+    "2.5D/3D icin film hatti (herakles-world-v21) kullanilmaz; simcraft kendi renderer'i.",
+    "main'e push YASAK; PR hatti."
+  ],
+  "falsifier": "DEVIR BASARISIZ: (a) --shot/--dump kaniti uretilmezse, (b) main'e direkt push yapilirsa, (c) mevcut oyunlardan biri bozulursa.",
+  "yazan": "kurator (herakles-harness oturumu)",
+  "ts": "2026-09-29T02:50:00Z"
+}

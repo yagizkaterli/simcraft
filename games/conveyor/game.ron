@@ -1,0 +1,103 @@
+#![enable(implicit_some)]
+// Conveyor — a factory production line.
+//   A feeder at the left edge spawns items onto a conveyor belt.
+//   Three stations process each item in sequence (stage 1, 2, 3).
+//   The collector at the right edge counts finished products.
+//   Each station has a state machine: Idle -> Work -> Done.
+//   Score: items collected by the collector.
+Game(
+    name: "conveyor",
+
+    // Written before senses existed: every expression sees the whole world.
+    perception: Direct,
+
+    kinds: {
+        "wall":    (glyph: '#', solid: true),
+        "feeder":  (glyph: 'F', solid: false,
+                    props: { "total_spawned": 0 }),
+        "item":    (glyph: 'o', solid: true,
+                    props: { "stage": 0 }),
+        "station": (glyph: '.', solid: false, fsm: "station",
+                    props: { "work_count": 0 },
+                    glyphs: { "Idle": '.', "Work": '*', "Done": 'o' }),
+        "collector": (glyph: 'C', solid: false,
+                      props: { "total": 0 }),
+    },
+
+    params: {
+        "spawn_interval": 8,      // ticks between item spawns
+        "work_ticks": 4,          // ticks a station works on an item
+        "max_ticks": 300,
+    },
+
+    fsms: {
+        "station": (
+            initial: "Idle",
+            states: {
+                "Idle": (enter: [ Set("work_count", "0") ]),
+                "Work": (),
+                "Done": (enter: [ Set("work_count", "0") ]),
+            },
+            transitions: [
+                // Item arrived on this cell -> start working
+                (from: "Idle", to: "Work", when: r#"near.item == 0"#),
+                // Work takes work_ticks ticks (per-station counter)
+                (from: "Work", to: "Done", when: "me.work_count >= p.work_ticks"),
+                // Item moved away -> back to idle
+                (from: "Done", to: "Idle", when: r#"near.item > 0"#),
+            ],
+        ),
+    },
+
+    rules: [
+        // Feeder spawns a new item periodically
+        (name: "feed", for: "feeder",
+         when: "tick % p.spawn_interval == 0",
+         then: [ Spawn("item"), Add("total_spawned", "1") ]),
+
+        // Items move right along the conveyor belt.
+        // Move only when there's NO station on this cell,
+        // OR the station on this cell is in Done state.
+        (name: "convey", for: "item",
+         when: r#"near.station > 0 || around("station", "Done", 0) > 0"#,
+         then: [ Move("1", "0") ]),
+
+        // Station counts work ticks while processing
+        (name: "work_timer", for: "station", state: "Work",
+         then: [ Add("work_count", "1") ]),
+
+        // Station increments item's stage when item is on this cell
+        (name: "process", for: "station", state: "Work",
+         when: r#"near.item == 0"#,
+         then: [ On(Nearest("item"), [ Add("stage", "1") ]) ]),
+
+        // Collector despawns items that reach it and counts them
+        (name: "collect", for: "collector",
+         when: r#"near.item == 0"#,
+         then: [ Despawn(Nearest("item")), Add("total", "1"), Emit("collect") ]),
+    ],
+
+    layout: (
+        legend: { '#': "wall",
+                  'F': "feeder",
+                  'C': "collector",
+                  '1': ("station", {}),
+                  '2': ("station", {}),
+                  '3': ("station", {}) },
+        rows: [
+            "####################################",
+            "#F..1..2..3.......................C#",
+            "#..................................#",
+            "#..................................#",
+            "#..................................#",
+            "#..................................#",
+            "####################################",
+        ],
+    ),
+
+    score: "me.total",
+
+    end: [
+        (when: "tick >= p.max_ticks", result: "time_up"),
+    ],
+)
