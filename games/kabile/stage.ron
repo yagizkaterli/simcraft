@@ -1,0 +1,46 @@
+#![enable(implicit_some)]
+// KABİLE on the HD stage (sim-gpu, `simcraft-play games/kabile`).
+// Top-down 16×16 tribe field: rows recede with `row_depth`, ants walk their FSM paths.
+Stage(
+    assets: ["nature_hd"],
+    cells_across: 16.0,
+    horizon: 0.55,
+    plane: 0,
+    row_depth: 0.05,
+    follow: "a1",
+    sky: "sky",
+    layers: [
+        (image: "mountains",   depth: 30.0, height: 50.0, haze: 35, blur: 1.0),
+        (image: "forest",      depth: 12.0, height: 14.0, haze: 18, blur: 0.5),
+        (image: "meadow",      depth: 4.0,  height: 3.6,  haze: 4,  lift: -0.05),
+        (image: "grass_front", depth: 1.0,  height: 0.28, lift: -0.1, offset: 7.0),
+        (image: "grass_front", depth: 0.55, height: 0.5,  lift: -0.12, front: true, blur: 1.6, opacity: 0.95),
+    ],
+    soil: (image: "soil", scale: 5.0, hollow: "hollow", darken: 55),
+    kinds: {
+        // Yürüyen karınca çevrimi — yetkisiz a11/a12 hareketsiz durur (ant_dormant).
+        "a1":  (frames: ["ant_walk_0", "ant_walk_1", "ant_walk_2", "ant_walk_3",
+                         "ant_walk_4", "ant_walk_5", "ant_walk_6", "ant_walk_7"], height: 0.42, bob: 0.008, fps: 14.0),
+        "a2":  (frames: ["ant_walk_0", "ant_walk_1", "ant_walk_2", "ant_walk_3",
+                         "ant_walk_4", "ant_walk_5", "ant_walk_6", "ant_walk_7"], height: 0.40, bob: 0.008, fps: 13.0),
+        "a3":  (frames: ["ant_walk_0", "ant_walk_1", "ant_walk_2", "ant_walk_3",
+                         "ant_walk_4", "ant_walk_5", "ant_walk_6", "ant_walk_7"], height: 0.44, bob: 0.008, fps: 15.0),
+        "a4":  (frames: ["ant_walk_0", "ant_walk_1", "ant_walk_2", "ant_walk_3",
+                         "ant_walk_4", "ant_walk_5", "ant_walk_6", "ant_walk_7"], height: 0.42, bob: 0.008, fps: 14.0),
+        "a5":  (frames: ["ant_walk_0", "ant_walk_1", "ant_walk_2", "ant_walk_3",
+                         "ant_walk_4", "ant_walk_5", "ant_walk_6", "ant_walk_7"], height: 0.42, bob: 0.008, fps: 14.0),
+        "a6":  (frames: ["ant_walk_0", "ant_walk_1", "ant_walk_2", "ant_walk_3",
+                         "ant_walk_4", "ant_walk_5", "ant_walk_6", "ant_walk_7"], height: 0.42, bob: 0.008, fps: 16.0),
+        "a7":  (frames: ["ant_walk_0", "ant_walk_1", "ant_walk_2", "ant_walk_3",
+                         "ant_walk_4", "ant_walk_5", "ant_walk_6", "ant_walk_7"], height: 0.42, bob: 0.008, fps: 12.0),
+        "a8":  (frames: ["ant_walk_0", "ant_walk_1", "ant_walk_2", "ant_walk_3",
+                         "ant_walk_4", "ant_walk_5", "ant_walk_6", "ant_walk_7"], height: 0.42, bob: 0.008, fps: 14.0),
+        "a9":  (frames: ["ant_walk_0", "ant_walk_1", "ant_walk_2", "ant_walk_3",
+                         "ant_walk_4", "ant_walk_5", "ant_walk_6", "ant_walk_7"], height: 0.42, bob: 0.008, fps: 14.0),
+        "a10": (frames: ["ant_walk_0", "ant_walk_1", "ant_walk_2", "ant_walk_3",
+                         "ant_walk_4", "ant_walk_5", "ant_walk_6", "ant_walk_7"], height: 0.42, bob: 0.008, fps: 14.0),
+        "a11": (frames: ["ant_dormant"], height: 0.42),
+        "a12": (frames: ["ant_dormant"], height: 0.42),
+    },
+    vignette: 35,
+)
