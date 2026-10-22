@@ -359,6 +359,8 @@ mod tests {
             width: 10000,
             start: (0, 0, 0),
             blend: 0,
+            closed: true,
+            fork: None,
             left: SideDef { width: 0, grip: 1000, wall: true },
             right: SideDef { width: 0, grip: 1000, wall: true },
             segments: vec![

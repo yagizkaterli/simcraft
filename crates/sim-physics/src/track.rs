@@ -37,6 +37,38 @@ pub struct SegmentDef {
     pub name: String,
 }
 
+/// One arm of a fork: the road that leaves the end of `TrackDef.segments` and runs until a wall across its end.
+/// An arm is not driven in a slice that ends at the choice (the 90-second opening); it is real geometry, so its
+/// length, its end and its wall are measured, not drawn from a picture.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ArmDef {
+    /// What the choice is called ("HIGHWAY 9", "LANTERN MOTEL EXIT").
+    pub name: String,
+    /// Racing surface, edge to edge (0: the main road's width).
+    #[serde(default)]
+    pub width: i64,
+    #[serde(default)]
+    pub left: SideDef,
+    #[serde(default)]
+    pub right: SideDef,
+    /// A wall across the end of the arm. A slice ends at it; an open arm with no wall has no end at all.
+    #[serde(default = "yes")]
+    pub end_wall: bool,
+    pub segments: Vec<SegmentDef>,
+}
+
+/// Where the road splits: two (or more) arms laid from the end of the main road.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ForkDef {
+    pub arms: Vec<ArmDef>,
+}
+
+fn yes() -> bool {
+    true
+}
+
 /// A track as data. Lengths in mm, angles in hundredths of a degree.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -51,11 +83,17 @@ pub struct TrackDef {
     /// transition). 0: it steps.
     #[serde(default)]
     pub blend: i64,
+    /// Whether the main road must end where it started (a lap). A highway with a fork at its end is open.
+    #[serde(default = "yes")]
+    pub closed: bool,
     /// What lies beyond each edge of the racing surface (left and right of the direction of travel).
     #[serde(default)]
     pub left: SideDef,
     #[serde(default)]
     pub right: SideDef,
+    /// The arms the road splits into at its end; none for a track that does not fork.
+    #[serde(default)]
+    pub fork: Option<ForkDef>,
     pub segments: Vec<SegmentDef>,
 }
 
@@ -168,14 +206,58 @@ pub struct Pose {
     pub bank: Angle,
 }
 
+/// An arm of a fork as built: a real road from the main road's end to a wall across its own end.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Arm {
+    pub name: String,
+    pub width: Fx,
+    pub length: Fx,
+    /// Offsets of the walls (left positive, right negative), if the arm has them.
+    pub wall_left: Option<Fx>,
+    pub wall_right: Option<Fx>,
+    /// A wall across the end of the arm.
+    pub end_wall: bool,
+    /// Where the arm ends: x, y (mm) and heading. Distinct arms end at distinct places.
+    pub end: (Fx, Fx, Angle),
+    segs: Vec<Seg>,
+}
+
+impl Arm {
+    /// The surface `s` metres along the arm, `offset` to its left. An arm does not wrap: `s` is clamped to it.
+    pub fn pose(&self, s: Fx, offset: Fx) -> Pose {
+        let s = s.clamp(Fx::ZERO, self.length);
+        let i = self.segs.partition_point(|g| g.s0 <= s).saturating_sub(1);
+        let g = &self.segs[i];
+        let (x, y, heading) = at(g, s - g.s0);
+        let bank = g.bank;
+        Pose { x: x - offset * heading.sin(), y: y + offset * heading.cos(), z: -offset * bank.sin() / bank.cos(), heading, bank }
+    }
+
+    /// The centreline at the arm's end (the wall, when `end_wall`).
+    pub fn end_pose(&self) -> Pose {
+        self.pose(self.length, Fx::ZERO)
+    }
+}
+
+/// The arms a track splits into at `at` metres along the main road.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Fork {
+    pub at: Fx,
+    pub arms: Vec<Arm>,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Track {
     pub name: String,
     pub width: Fx,
     pub length: Fx,
+    /// Whether the main road closes on itself. An open road (a highway) does not wrap.
+    pub closed: bool,
     /// Offsets of the walls (left positive, right negative), if there are walls.
     pub wall_left: Option<Fx>,
     pub wall_right: Option<Fx>,
+    /// The arms at the road's end, if it forks.
+    pub fork: Option<Fork>,
     left: SideDef,
     right: SideDef,
     blend: Fx,
@@ -193,8 +275,91 @@ fn arc_angle(t: Fx, r: Fx) -> Angle {
     Angle(((t.0 as i128 * TURN as i128 * 65536) / (r.0 as i128 * TWO_PI.0 as i128)) as i64)
 }
 
+/// Lay `segments` end to end from `start`. Returns the segments, where the chain ends (x, y, heading) and its
+/// length. Everything wrong is appended to `problems`, each line prefixed with `label`.
+fn lay(
+    segments: &[SegmentDef],
+    start: (Fx, Fx, Angle),
+    label: &str,
+    problems: &mut Vec<String>,
+) -> (Vec<Seg>, (Fx, Fx, Angle), Fx) {
+    let mm = |v: i64| Fx::ratio(v, 1000);
+    let (mut x, mut y, mut h) = start;
+    let mut s = Fx::ZERO;
+    let mut segs = Vec::new();
+    for (i, sd) in segments.iter().enumerate() {
+        let name = if sd.name.is_empty() { format!("segment {i}") } else { format!("segment {i} ({})", sd.name) };
+        let label = if label.is_empty() { name } else { format!("{label} {name}") };
+        let bank = Angle::centidegrees(sd.bank);
+        if sd.bank.abs() >= 4500 {
+            problems.push(format!("{label}: bank {}° is steeper than any track (under 45°)", sd.bank / 100));
+        }
+        let (len, kind) = match sd.shape {
+            Shape::Straight(l) => {
+                if l <= 0 {
+                    problems.push(format!("{label}: a straight needs a length above 0 (is {l})"));
+                }
+                (mm(l), Kind::Straight)
+            }
+            Shape::Left(r, a) | Shape::Right(r, a) => {
+                if r <= 0 || a <= 0 || a > 36000 {
+                    problems.push(format!("{label}: a turn needs a radius above 0 and 0..360° (is {r} mm, {a})"));
+                }
+                let sign = if matches!(sd.shape, Shape::Left(..)) { 1 } else { -1 };
+                let radius = mm(r.max(1));
+                let turn = Angle::centidegrees(a);
+                // The centre is `radius` to the left (or right) of the start.
+                let (cx, cy) = (x - radius * h.sin() * sign, y + radius * h.cos() * sign);
+                let a0 = h - Angle(sign * TURN / 4);
+                (arc(radius, turn), Kind::Arc { radius, sign, cx, cy, a0, turn })
+            }
+            Shape::EasedLeft(r, a, l) | Shape::EasedRight(r, a, l) => {
+                let sign = if matches!(sd.shape, Shape::EasedLeft(..)) { 1 } else { -1 };
+                let (radius, turn, spiral) = (mm(r.max(1)), Angle::centidegrees(a), mm(l.max(0)));
+                // Two spirals turn spiral/radius together; the arc between them turns the rest.
+                let total = turn.to_radians();
+                let arc_part = total * radius - spiral;
+                if r <= 0 || a <= 0 || a > 36000 || l < 0 || arc_part < Fx::ZERO {
+                    problems.push(format!(
+                        "{label}: an eased turn needs a radius above 0, 0..360°, and spirals short enough to fit                              the angle (spiral ≤ angle × radius: {} mm here; is {r} mm, {a}, {l} mm)",
+                        (total * radius).to_units(1000)
+                    ));
+                }
+                (spiral * 2 + arc_part.max(Fx::ZERO), Kind::Eased { radius, sign, spiral })
+            }
+        };
+        let pts = match kind {
+            Kind::Eased { radius, sign, spiral } => {
+                // Walk the curve: exact heading, midpoint rule for the position.
+                let n = (len / STEP).floor().max(1) as usize;
+                let mut pts = Vec::with_capacity(n + 2);
+                let (mut px, mut py) = (x, y);
+                pts.push((px, py));
+                let mut t = Fx::ZERO;
+                while t < len {
+                    let dt = STEP.min(len - t);
+                    let mid = t + dt / 2;
+                    let hd = h + Angle(Angle::radians(eased_turned(radius, spiral, len, mid)).0 * sign);
+                    px += dt * hd.cos();
+                    py += dt * hd.sin();
+                    pts.push((px, py));
+                    t += dt;
+                }
+                pts
+            }
+            _ => Vec::new(),
+        };
+        segs.push(Seg { s0: s, len, x0: x, y0: y, h0: h, kind, bank, pts });
+        let end = at(&segs[segs.len() - 1], len);
+        (x, y, h) = (end.0, end.1, end.2);
+        s += len;
+    }
+    (segs, (x, y, h), s)
+}
+
 impl Track {
-    /// Lay the segments end to end. A track must close on itself: everything wrong is listed at once.
+    /// Lay the segments end to end. A closed track must end where it started; an open one (a highway, a slice that
+    /// ends at a fork) need not. Everything wrong is listed at once.
     pub fn new(d: &TrackDef) -> Result<Track, Vec<String>> {
         let mut problems = Vec::new();
         if d.width <= 0 {
@@ -204,85 +369,55 @@ impl Track {
             problems.push("a track needs segments".into());
         }
         let mm = |v: i64| Fx::ratio(v, 1000);
-        let (mut x, mut y, mut h) = (mm(d.start.0), mm(d.start.1), Angle::centidegrees(d.start.2));
-        let mut s = Fx::ZERO;
-        let mut segs = Vec::new();
-        for (i, sd) in d.segments.iter().enumerate() {
-            let label = if sd.name.is_empty() { format!("segment {i}") } else { format!("segment {i} ({})", sd.name) };
-            let bank = Angle::centidegrees(sd.bank);
-            if sd.bank.abs() >= 4500 {
-                problems.push(format!("{label}: bank {}° is steeper than any track (under 45°)", sd.bank / 100));
+        let start = (mm(d.start.0), mm(d.start.1), Angle::centidegrees(d.start.2));
+        let (segs, (x, y, h), s) = lay(&d.segments, start, "", &mut problems);
+        if d.closed {
+            let (sx, sy, sh) = start;
+            let gap = ((x - sx) * (x - sx) + (y - sy) * (y - sy)).sqrt();
+            let turned = (h - sh).signed();
+            if !segs.is_empty() && (gap > Fx::HALF || turned.0.abs() > Angle::centidegrees(50).0) {
+                problems.push(format!(
+                    "the track does not close: its end is {:.2} m from the start, heading off by {:.2}°",
+                    gap.0 as f64 / 65536.0,
+                    turned.0 as f64 * 360.0 / TURN as f64
+                ));
             }
-            let (len, kind) = match sd.shape {
-                Shape::Straight(l) => {
-                    if l <= 0 {
-                        problems.push(format!("{label}: a straight needs a length above 0 (is {l})"));
-                    }
-                    (mm(l), Kind::Straight)
-                }
-                Shape::Left(r, a) | Shape::Right(r, a) => {
-                    if r <= 0 || a <= 0 || a > 36000 {
-                        problems.push(format!("{label}: a turn needs a radius above 0 and 0..360° (is {r} mm, {a})"));
-                    }
-                    let sign = if matches!(sd.shape, Shape::Left(..)) { 1 } else { -1 };
-                    let radius = mm(r.max(1));
-                    let turn = Angle::centidegrees(a);
-                    // The centre is `radius` to the left (or right) of the start.
-                    let (cx, cy) = (x - radius * h.sin() * sign, y + radius * h.cos() * sign);
-                    let a0 = h - Angle(sign * TURN / 4);
-                    (arc(radius, turn), Kind::Arc { radius, sign, cx, cy, a0, turn })
-                }
-                Shape::EasedLeft(r, a, l) | Shape::EasedRight(r, a, l) => {
-                    let sign = if matches!(sd.shape, Shape::EasedLeft(..)) { 1 } else { -1 };
-                    let (radius, turn, spiral) = (mm(r.max(1)), Angle::centidegrees(a), mm(l.max(0)));
-                    // Two spirals turn spiral/radius together; the arc between them turns the rest.
-                    let total = turn.to_radians();
-                    let arc_part = total * radius - spiral;
-                    if r <= 0 || a <= 0 || a > 36000 || l < 0 || arc_part < Fx::ZERO {
-                        problems.push(format!(
-                            "{label}: an eased turn needs a radius above 0, 0..360°, and spirals short enough to fit                              the angle (spiral ≤ angle × radius: {} mm here; is {r} mm, {a}, {l} mm)",
-                            (total * radius).to_units(1000)
-                        ));
-                    }
-                    (spiral * 2 + arc_part.max(Fx::ZERO), Kind::Eased { radius, sign, spiral })
-                }
-            };
-            let pts = match kind {
-                Kind::Eased { radius, sign, spiral } => {
-                    // Walk the curve: exact heading, midpoint rule for the position.
-                    let n = (len / STEP).floor().max(1) as usize;
-                    let mut pts = Vec::with_capacity(n + 2);
-                    let (mut px, mut py) = (x, y);
-                    pts.push((px, py));
-                    let mut t = Fx::ZERO;
-                    while t < len {
-                        let dt = STEP.min(len - t);
-                        let mid = t + dt / 2;
-                        let hd = h + Angle(Angle::radians(eased_turned(radius, spiral, len, mid)).0 * sign);
-                        px += dt * hd.cos();
-                        py += dt * hd.sin();
-                        pts.push((px, py));
-                        t += dt;
-                    }
-                    pts
-                }
-                _ => Vec::new(),
-            };
-            segs.push(Seg { s0: s, len, x0: x, y0: y, h0: h, kind, bank, pts });
-            let end = at(&segs[segs.len() - 1], len);
-            (x, y, h) = (end.0, end.1, end.2);
-            s += len;
         }
-        let (sx, sy, sh) = (mm(d.start.0), mm(d.start.1), Angle::centidegrees(d.start.2));
-        let gap = ((x - sx) * (x - sx) + (y - sy) * (y - sy)).sqrt();
-        let turned = (h - sh).signed();
-        if !segs.is_empty() && (gap > Fx::HALF || turned.0.abs() > Angle::centidegrees(50).0) {
-            problems.push(format!(
-                "the track does not close: its end is {:.2} m from the start, heading off by {:.2}°",
-                gap.0 as f64 / 65536.0,
-                turned.0 as f64 * 360.0 / TURN as f64
-            ));
-        }
+        // The arms leave the end of the main road, each with its own width, run-off and end wall.
+        let fork = d.fork.as_ref().map(|f| {
+            if f.arms.len() < 2 {
+                problems.push(format!("a fork needs two arms at least (has {})", f.arms.len()));
+            }
+            let arms = f
+                .arms
+                .iter()
+                .enumerate()
+                .filter_map(|(i, a)| {
+                    let name = if a.name.is_empty() { format!("arm {i}") } else { a.name.clone() };
+                    if a.segments.is_empty() {
+                        problems.push(format!("arm \"{name}\": needs segments"));
+                        return None;
+                    }
+                    let width = if a.width > 0 { mm(a.width) } else { mm(d.width) };
+                    let (segs, end, length) = lay(&a.segments, (x, y, h), &format!("arm \"{name}\""), &mut problems);
+                    if length <= Fx::ZERO {
+                        problems.push(format!("arm \"{name}\": has no length"));
+                    }
+                    let half = width / 2;
+                    Some(Arm {
+                        name,
+                        width,
+                        length,
+                        wall_left: a.left.wall.then(|| half + mm(a.left.width)),
+                        wall_right: a.right.wall.then(|| -(half + mm(a.right.width))),
+                        end_wall: a.end_wall,
+                        end,
+                        segs,
+                    })
+                })
+                .collect();
+            Fork { at: s, arms }
+        });
         if !problems.is_empty() {
             return Err(problems);
         }
@@ -291,8 +426,10 @@ impl Track {
             name: d.name.clone(),
             width: mm(d.width),
             length: s,
+            closed: d.closed,
             wall_left: d.left.wall.then(|| half + mm(d.left.width)),
             wall_right: d.right.wall.then(|| -(half + mm(d.right.width))),
+            fork,
             left: d.left,
             right: d.right,
             blend: mm(d.blend),
@@ -309,9 +446,9 @@ impl Track {
         &self.names[i]
     }
 
-    /// Distance `s` brought into `0..length` (laps wrap).
+    /// Distance `s` brought into `0..length` (a closed lap wraps; an open road stops at its end).
     pub fn wrap(&self, s: Fx) -> Fx {
-        Fx(s.0.rem_euclid(self.length.0))
+        if self.closed { Fx(s.0.rem_euclid(self.length.0)) } else { s.clamp(Fx::ZERO, self.length) }
     }
 
     fn seg_at(&self, s: Fx) -> usize {
@@ -324,6 +461,8 @@ impl Track {
         let i = self.seg_at(s);
         let g = &self.segs[i];
         let n = self.segs.len();
+        let prev = if self.closed || i > 0 { self.segs[(i + n - 1) % n].bank } else { g.bank };
+        let next = if self.closed || i + 1 < n { self.segs[(i + 1) % n].bank } else { g.bank };
         // An eased turn banks along its spirals (from the segment before, to the one after).
         if let Kind::Eased { spiral, .. } = g.kind
             && spiral > Fx::ZERO
@@ -331,18 +470,18 @@ impl Track {
             let t = s - g.s0;
             let lerp = |a: Angle, b: Angle, f: Fx| a + Angle((((b - a).0 as i128 * f.0 as i128) >> 16) as i64);
             if t < spiral {
-                return lerp(self.segs[(i + n - 1) % n].bank, g.bank, t / spiral);
+                return lerp(prev, g.bank, t / spiral);
             }
             if t > g.len - spiral {
-                return lerp(g.bank, self.segs[(i + 1) % n].bank, (t - (g.len - spiral)) / spiral);
+                return lerp(g.bank, next, (t - (g.len - spiral)) / spiral);
             }
             return g.bank;
         }
         let half = self.blend / 2;
         let (from, to, into) = if s - g.s0 < half {
-            (self.segs[(i + n - 1) % n].bank, g.bank, s - g.s0 + half)
+            (prev, g.bank, s - g.s0 + half)
         } else if g.s0 + g.len - s < half {
-            (g.bank, self.segs[(i + 1) % n].bank, s - (g.s0 + g.len) + half)
+            (g.bank, next, s - (g.s0 + g.len) + half)
         } else {
             return g.bank;
         };
@@ -384,8 +523,23 @@ impl Track {
     }
 
     /// Where the point (x, y) is: the nearest segment's `s` and `offset`. `hint`, the segment of the last answer
-    /// for the same car, is checked first (a car moves little in a tick).
+    /// for the same car, is checked first (a car moves little in a tick). An open road ends: a point past either
+    /// end is at that end, its offset measured across the end's heading.
     pub fn locate(&self, x: Fx, y: Fx, hint: Option<usize>) -> Place {
+        if !self.closed && !self.segs.is_empty() {
+            let (first, last) = (&self.segs[0], &self.segs[self.segs.len() - 1]);
+            let (ex, ey, eh) = at(last, last.len);
+            let past_end = (x - ex) * eh.cos() + (y - ey) * eh.sin();
+            if past_end > Fx::ZERO {
+                let offset = (x - ex) * -eh.sin() + (y - ey) * eh.cos();
+                return Place { s: self.length, offset, seg: self.segs.len() - 1 };
+            }
+            let before = (x - first.x0) * first.h0.cos() + (y - first.y0) * first.h0.sin();
+            if before < Fx::ZERO {
+                let offset = (x - first.x0) * -first.h0.sin() + (y - first.y0) * first.h0.cos();
+                return Place { s: Fx::ZERO, offset, seg: 0 };
+            }
+        }
         let n = self.segs.len();
         if let Some(h) = hint.filter(|&h| h < n) {
             for i in [h, (h + 1) % n, (h + n - 1) % n] {
@@ -455,7 +609,10 @@ impl Track {
                 let (cx, cy) = (bx - ax, by - ay);
                 let len2 = (cx * cx + cy * cy).max(Fx(1));
                 let f = ((x - ax) * cx + (y - ay) * cy) / len2;
-                let t = STEP * a as i64 + STEP * f;
+                // The last chord may be shorter than a full step.
+                let base = STEP * a as i64;
+                let span = (g.len - base).min(STEP).max(Fx(1));
+                let t = base + span * f;
                 // Left of the chord is positive.
                 let chord = len2.sqrt();
                 (t, ((x - ax) * cy * -Fx::ONE + (y - ay) * cx) / chord)
@@ -481,7 +638,9 @@ fn at(g: &Seg, t: Fx) -> (Fx, Fx, Angle) {
         Kind::Eased { radius, sign, spiral } => {
             let t = t.clamp(Fx::ZERO, g.len);
             let k = ((t / STEP).floor().max(0) as usize).min(g.pts.len() - 2);
-            let f = (t - STEP * k as i64) / STEP;
+            let base = STEP * k as i64;
+            let span = (g.len - base).min(STEP).max(Fx(1));
+            let f = ((t - base) / span).clamp(Fx::ZERO, Fx::ONE);
             let ((ax, ay), (bx, by)) = (g.pts[k], g.pts[k + 1]);
             let heading = g.h0 + Angle(Angle::radians(eased_turned(radius, spiral, g.len, t)).0 * sign);
             (ax + (bx - ax) * f, ay + (by - ay) * f, heading)
@@ -504,6 +663,8 @@ mod tests {
             width: 15000,
             start: (0, 0, 0),
             blend: 40000,
+            closed: true,
+            fork: None,
             left: SideDef::default(),
             right: SideDef { width: 0, grip: 1000, wall: true },
             segments: vec![
@@ -614,5 +775,115 @@ mod tests {
         // The inside of a banked turn is lower: 7 m left of the centreline at 24°, 7·tan 24° ≈ 3.12 m down.
         let p = t.pose(Fx::int(400), Fx::int(7));
         assert!((f(p.z) + 7.0 * 24f64.to_radians().tan()).abs() < 0.01, "{}", f(p.z));
+    }
+
+    /// A highway that does not close: 600 m, a gentle eased bend, 400 m more. It forks at its end.
+    fn highway() -> TrackDef {
+        TrackDef {
+            name: "test highway".into(),
+            width: 12000,
+            start: (0, 0, 0),
+            blend: 20000,
+            closed: false,
+            left: SideDef::default(),
+            right: SideDef { width: 4000, grip: 700, wall: true },
+            fork: Some(ForkDef {
+                arms: vec![
+                    ArmDef {
+                        name: "HIGHWAY 9".into(),
+                        width: 0,
+                        left: SideDef::default(),
+                        right: SideDef { width: 3000, grip: 700, wall: true },
+                        end_wall: true,
+                        segments: vec![
+                            SegmentDef { shape: Shape::Straight(300_000), bank: 0, name: "Highway".into() },
+                            SegmentDef { shape: Shape::EasedLeft(700_000, 800, 80_000), bank: 0, name: "Highway never ends".into() },
+                        ],
+                    },
+                    ArmDef {
+                        name: "LANTERN MOTEL EXIT".into(),
+                        width: 7000,
+                        left: SideDef::default(),
+                        right: SideDef { width: 0, grip: 1000, wall: true },
+                        end_wall: true,
+                        segments: vec![
+                            SegmentDef { shape: Shape::EasedRight(300_000, 3000, 0), bank: 0, name: "Exit ramp".into() },
+                            SegmentDef { shape: Shape::Straight(120_000), bank: 0, name: "Motel".into() },
+                        ],
+                    },
+                ],
+            }),
+            segments: vec![
+                SegmentDef { shape: Shape::Straight(600_000), bank: 0, name: "Opening".into() },
+                SegmentDef { shape: Shape::EasedLeft(900_000, 800, 80_000), bank: 0, name: "Gentle bend".into() },
+                SegmentDef { shape: Shape::Straight(400_000), bank: 0, name: "Approach".into() },
+            ],
+        }
+    }
+
+    #[test]
+    fn an_open_highway_need_not_close_and_does_not_wrap() {
+        let t = Track::new(&highway()).expect("an open road loads");
+        assert!(!t.closed);
+        assert!((f(t.length) - 1205.66).abs() < 0.1, "straights plus the bend: {} m", f(t.length));
+        // Past its end an open road stays at the end; it never comes back round the start.
+        let end = t.pose(t.length, Fx::ZERO);
+        let past = t.pose(t.length + Fx::int(500), Fx::ZERO);
+        assert_eq!((end.x, end.y, end.heading), (past.x, past.y, past.heading));
+    }
+
+    #[test]
+    fn a_fork_builds_arms_that_start_at_the_end_and_end_apart() {
+        let d = highway();
+        let t = Track::new(&d).unwrap();
+        let fork = t.fork.as_ref().expect("the highway forks");
+        assert_eq!(fork.arms.len(), 2);
+        let (fx, fy, _fh) = fork.arms[0].end;
+        assert!(fx != fork.arms[1].end.0 || fy != fork.arms[1].end.1, "the arms must not end at the same point");
+        let apart = ((fx - fork.arms[1].end.0) * (fx - fork.arms[1].end.0) + (fy - fork.arms[1].end.1) * (fy - fork.arms[1].end.1)).sqrt();
+        assert!(f(apart) > 100.0, "the two choices end {:.1} m apart", f(apart));
+        assert_ne!(fork.arms[0].length, fork.arms[1].length, "each arm is measured on its own");
+        let end = t.pose(t.length, Fx::ZERO);
+        for arm in &fork.arms {
+            let start = arm.pose(Fx::ZERO, Fx::ZERO);
+            assert!((start.x - end.x).abs() < Fx::ratio(1, 1000) && (start.y - end.y).abs() < Fx::ratio(1, 1000), "arm {} leaves the road's end", arm.name);
+            assert!((start.heading - end.heading).signed().0.abs() < Angle::centidegrees(1).0);
+            assert!(arm.end_wall, "both choices end at a wall");
+            let last = arm.end_pose();
+            assert!((last.x - arm.end.0).abs() < Fx::ratio(1, 1000) && (last.y - arm.end.1).abs() < Fx::ratio(1, 1000));
+        }
+    }
+
+    #[test]
+    fn a_fork_needs_two_arms_with_geometry() {
+        let mut d = highway();
+        d.fork = Some(ForkDef { arms: vec![ArmDef {
+            name: "alone".into(),
+            width: 0,
+            left: SideDef::default(),
+            right: SideDef::default(),
+            end_wall: true,
+            segments: vec![SegmentDef { shape: Shape::Straight(10_000), bank: 0, name: String::new() }],
+        }] });
+        let e = Track::new(&d).unwrap_err();
+        assert!(e.iter().any(|p| p.contains("two arms")), "{e:#?}");
+    }
+
+    /// The roadcase highway as data: pose and locate must agree end to end (an open road, eased turns included).
+    #[test]
+    fn the_highway_pose_and_locate_agree_end_to_end() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../games/roadcase/tracks/roadcase-highway.ron");
+        let def: TrackDef = ron::from_str(&std::fs::read_to_string(path).expect("the highway")).expect("a TrackDef");
+        let t = Track::new(&def).expect("it loads");
+        let mut hint = None;
+        for i in 0..(f(t.length) * 2.0) as i64 {
+            let s = Fx::ratio(i, 2);
+            for off in [-4, 0, 4] {
+                let p = t.pose(s, Fx::int(off));
+                let at = t.locate(p.x, p.y, hint);
+                hint = Some(at.seg);
+                assert!((f(at.s) - f(s)).abs() < 0.02 && (f(at.offset) - off as f64).abs() < 0.02, "s {} off {off}: {at:?}", f(s));
+            }
+        }
     }
 }

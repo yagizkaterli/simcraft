@@ -2974,6 +2974,16 @@ impl Rules for Game {
         if self.ends.is_empty() {
             return None;
         }
+        // End conditions may read props (`prop_of`), so the world is bound as for any other query.
+        let _bound = self.bind_world(world);
+        // But the end is nobody's tick: clear the entity left by the last evaluation, so
+        // `me`-relative natives (`nearest_prop`, `pos`, ...) return their no-entity defaults
+        // rather than a stale entity's answers (entity 0 is never in a world).
+        CTX.with(|c| {
+            let mut c = c.borrow_mut();
+            c.me = 0;
+            c.pos = (0, 0, 0);
+        });
         let mut scope = self.world_scope(world);
         for end in &self.ends {
             match self.eval_bool(&mut scope, &end.when) {

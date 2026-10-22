@@ -396,11 +396,36 @@ pub struct Look {
     pub logos: Vec<(f32, f32)>,
     /// The banner (`banner`) over the track on a gantry: where (m along the track from the start line).
     pub banner_at: f32,
+    /// Roadside billboards (`sponsors` picture) at these places, on the open road (a closed track draws its
+    /// sponsor boards on the fence instead). One picture, shown once per entry: the same sign may repeat.
+    pub billboards: Vec<Billboard>,
     /// The cars' model (a `.glb`, fitted to the kind's footprint); none, or missing: the view's own box cars.
     pub model: Option<ModelLook>,
     /// Paint schemes, in order of the cars' numbers: `((r, g, b), (r, g, b))`, the body and the second colour
     /// (rockers, stripes, number plates). None: `car_colors`.
     pub liveries: Vec<Livery>,
+}
+
+/// One roadside billboard on the open road: the `sponsors` picture, on a post to the left of the road.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Billboard {
+    /// Distance along the road from the start (m).
+    pub at: f32,
+    /// How far beyond the left edge of the road its face stands (m).
+    #[serde(default = "billboard_side")]
+    pub side: f32,
+    /// The face's height above the ground (m): its bottom edge.
+    #[serde(default = "billboard_height")]
+    pub height: f32,
+}
+
+fn billboard_side() -> f32 {
+    8.0
+}
+
+fn billboard_height() -> f32 {
+    2.0
 }
 
 impl Default for Look {
@@ -435,6 +460,7 @@ impl Default for Look {
             boards: (45.0, 6),
             logos: Vec::new(),
             banner_at: 0.0,
+            billboards: Vec::new(),
             model: None,
             liveries: Vec::new(),
         }
@@ -1943,8 +1969,10 @@ impl DrivePlay {
             Some((a, why, at)) if self.time - at < 3.0 => format!(" — {a}: {why}"),
             _ => String::new(),
         };
+        // A game that ends (an `end:` condition) says how, in the title, as a race does.
+        let end = self.engine.outcome().map(|o| format!(" — {o}")).unwrap_or_default();
         format!(
-            "{} — {} — {what} — {}{refused} — C: camera, arrows: drive",
+            "{} — {} — {what} — {}{end}{refused} — C: camera, arrows: drive",
             self.engine.rules().def.name,
             self.track.name,
             if paused { "paused".to_string() } else { format!("{speed:.0} ticks/s") }

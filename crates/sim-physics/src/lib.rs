@@ -12,5 +12,5 @@ pub mod verlet;
 
 pub use driver::{Ahead, Pilot, Plan, ahead_of, sit_on};
 pub use fixed::{Angle, Fx, TURN, curve};
-pub use track::{Place, Pose, SideDef, Track, TrackDef};
+pub use track::{Arm, Fork, Place, Pose, SideDef, Track, TrackDef};
 pub use vehicle::{Fleet, Params, VehicleDef};

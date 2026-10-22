@@ -176,3 +176,42 @@ fn a_frame_has_the_cockpit_the_mirror_and_the_sky() {
     let chase = c.compose(&cars, &Kin::default(), &Hud::default(), &mut rig, 0.0, 1.0 / 60.0);
     assert!(chase.mirror.is_none());
 }
+
+
+/// HRK-ROADCASE-HIGHWAY-001: the slice is driveable end to end, and at its fork the car's side of the road is
+/// recorded as the choice (1 HIGHWAY 9, 2 LANTERN MOTEL EXIT).
+#[test]
+fn the_roadcase_highway_is_driven_to_its_fork_and_the_choice_is_recorded() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../games/roadcase");
+    let panel = std::fs::read_to_string(dir.join("engine.toml")).expect("the panel");
+    let (world, game) = sim_rules::Game::load_panel(&dir, &panel).expect("the game");
+    let engine = sim_core::Engine::<sim_core::Loaded, sim_rules::Game>::new(world, game).validate().expect("valid").start();
+    let (drive, track) = crate::drive::load(&dir, engine.rules()).expect("the drive view");
+    let length = track.length;
+    let mut play = DrivePlay::new(engine, drive, track);
+    play.auto_you = true;
+    let mut choice = 0;
+    for _ in 0..6000 {
+        play.step(1);
+        let e = play.world().of_kind("car").next().expect("the car");
+        choice = e.props.get("route").copied().unwrap_or(0);
+        if choice != 0 {
+            let off = e.props.get("choice_off").copied().unwrap_or(0);
+            println!("fork choice: route {choice}, tick {}, at s {} mm, offset {} mm", play.world().tick, e.props.get("choice_s").copied().unwrap_or(0), off);
+            assert!(e.props.get("choice_s").copied().unwrap_or(0) >= 2_300_000, "the choice is recorded at the fork");
+            let s_mm = e.props.get("track_s").copied().unwrap_or(0) as f64 / 1000.0;
+            assert!(s_mm >= 2300.0 && s_mm <= length.0 as f64 / 65536.0, "the fork is on the main road ({s_mm} m of {:.1})", length.0 as f64 / 65536.0);
+            assert_eq!(choice, if off >= 0 { 1 } else { 2 }, "left is HIGHWAY 9, right the motel exit");
+            // The slice ends at the choice: the game's end condition stops the simulation.
+            let end = play.engine.outcome();
+            assert_eq!(end, Some(if choice == 1 { "HIGHWAY CONTINUES" } else { "MOTEL EXIT" }), "the fork ends the slice");
+            let stopped = play.world().tick;
+            play.step(30);
+            assert_eq!(play.world().tick, stopped, "no ticks after the end");
+            println!("title after the end: {}", play.title(60.0, false));
+            assert!(play.title(60.0, false).contains(if choice == 1 { "HIGHWAY CONTINUES" } else { "MOTEL EXIT" }));
+            break;
+        }
+    }
+    assert!(choice == 1 || choice == 2, "the car reached the fork and took a side (route {choice})");
+}

@@ -292,7 +292,150 @@ impl Surf {
     }
 }
 
+/// One road ribbon: asphalt, painted edges, shoulders, and a barrier on the right. `pose(s, offset)` gives the
+/// surface (x, y, z, heading) in the track's plane. Open roads only: a closed track's scene is the race-day one.
+#[allow(clippy::too_many_arguments)]
+fn ribbon<P: Fn(f32, f32) -> (f32, f32, f32, f32)>(
+    pose: P,
+    length: f32,
+    half: f32,
+    look: &Look,
+    road: &mut Surf,
+    white: &mut Builder,
+    grass: &mut Surf,
+    concrete: &mut Surf,
+) {
+    if length <= 0.0 || half <= 0.0 {
+        return;
+    }
+    let at = |s: f32, o: f32, lift: f32| {
+        let (x, y, z, _) = pose(s, o);
+        V3(x, z + lift, y)
+    };
+    let edge = 0.18f32;
+    let shoulder = 2.5f32;
+    let sc = road.scale;
+    let tint = road.tint(rgb(look.asphalt));
+    let line = rgb(look.white).map(|v| v * 0.9);
+    let wild = grass.tint(rgb(look.grass));
+    let wall_tint = concrete.tint(rgb(look.concrete));
+    let step = 3.0f32;
+    let n = (length / step).ceil().max(1.0) as usize;
+    for i in 0..n {
+        let (s0, s1) = (i as f32 * step, ((i + 1) as f32 * step).min(length));
+        let band = |b: &mut Builder, o0: f32, o1: f32, col: [f32; 3], lift: f32, textured: bool| {
+            let p = [at(s0, o0, lift), at(s1, o0, lift), at(s1, o1, lift), at(s0, o1, lift)];
+            let uv = if textured {
+                [[o0 / sc, s0 / sc], [o0 / sc, s1 / sc], [o1 / sc, s1 / sc], [o1 / sc, s0 / sc]]
+            } else {
+                [[0.0; 2]; 4]
+            };
+            b.quad(p, uv, col, 1.0);
+        };
+        // The racing surface, then the painted edge lines, then the shoulders and the land. The verge reaches far
+        // enough for the billboards (and a driver's eye): the road does not float on the sky.
+        band(&mut road.b, half, -half, tint, 0.0, true);
+        band(&mut *white, half, half - edge, line, 0.01, false);
+        band(&mut *white, -half + edge, -half, line, 0.01, false);
+        band(&mut grass.b, half + shoulder, half, wild, -0.02, true);
+        band(&mut grass.b, -half, -half - shoulder, wild, -0.02, true);
+        band(&mut grass.b, half + 70.0, half + shoulder, wild, -0.05, true);
+        band(&mut grass.b, -half - shoulder, -half - 70.0, wild, -0.05, true);
+        // The barrier on the right: its face, lit toward the road.
+        let (wa, wb) = (at(s0, -half - shoulder, 0.0), at(s1, -half - shoulder, 0.0));
+        let (ta, tb) = (V3(wa.0, look.wall_height, wa.2), V3(wb.0, look.wall_height, wb.2));
+        concrete.b.quad([wa, wb, tb, ta], [[s0 / 4.0, 0.0], [s1 / 4.0, 0.0], [s1 / 4.0, 1.0], [s0 / 4.0, 1.0]], wall_tint, 1.0);
+    }
+}
+
+/// The open road's scene: a highway (or any track that does not close), its shoulders, its barrier, the arms of
+/// its fork, and the billboards along it. A closed track keeps the race-day scene.
+fn open(track: &Track, look: &Look, photos: &Photos) -> Scene {
+    let sun = sun_dir(look);
+    let g = ground(track, look);
+    let mut road = Surf::new(photos, "asphalt", ASPHALT, Wrap::Repeat, sun, 3.0);
+    let mut white = Builder::new(WHITE, Wrap::Clamp, sun);
+    let mut grass = Surf::new(photos, "grass", GRASS, Wrap::Repeat, sun, 9.0);
+    let mut concrete = Surf::new(photos, "concrete", CONCRETE, Wrap::Repeat, sun, 4.0);
+    let mut panels: Vec<Builder> = Vec::new();
+
+    let main = |s: f32, o: f32| {
+        let p = track.pose(fx(s), fx(o));
+        (fl(p.x), fl(p.y), fl(p.z), rad(p.heading))
+    };
+    ribbon(main, fl(track.length), fl(track.width) / 2.0, look, &mut road, &mut white, &mut grass, &mut concrete);
+
+    // The arms: each its own ribbon, ending at a wall across it.
+    if let Some(fork) = &track.fork {
+        for arm in &fork.arms {
+            let pose = |s: f32, o: f32| {
+                let p = arm.pose(fx(s), fx(o));
+                (fl(p.x), fl(p.y), fl(p.z), rad(p.heading))
+            };
+            let half = fl(arm.width) / 2.0;
+            ribbon(pose, fl(arm.length), half, look, &mut road, &mut white, &mut grass, &mut concrete);
+            if arm.end_wall {
+                let e = arm.end_pose();
+                let h = rad(e.heading);
+                let (sn, cs) = h.sin_cos();
+                let at = |o: f32, up: f32| V3(fl(e.x) - o * sn, fl(e.z) + up, fl(e.y) + o * cs);
+                let wall_tint = concrete.tint(rgb(look.concrete));
+                concrete.b.quad(
+                    [at(half, 0.0), at(-half, 0.0), at(-half, look.wall_height), at(half, look.wall_height)],
+                    [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
+                    wall_tint,
+                    1.0,
+                );
+            }
+        }
+    }
+
+    // Billboards: the `sponsors` picture, each entry one sign on a post to the left of the road.
+    if let Some(f) = photos.get("sponsors") {
+        let mut b = Builder::new(&f.texture, Wrap::Clamp, sun);
+        let panel_h = f.size;
+        let panel_w = f.size * f.aspect();
+        for sign in &look.billboards {
+            let s = sign.at.clamp(0.0, fl(track.length));
+            let p = track.pose(fx(s), fx(fl(track.width) / 2.0 + sign.side));
+            let (hx, hy) = (fl(p.x), fl(p.y));
+            let h = rad(p.heading);
+            let (sn, cs) = h.sin_cos();
+            let up = fl(p.z);
+            // Across the face, left of travel.
+            let (lx, lz) = (-sn * panel_w / 2.0, cs * panel_w / 2.0);
+            let lo = up + sign.height;
+            let hi = lo + panel_h;
+            let a = V3(hx + lx, lo, hy + lz);
+            let c = V3(hx - lx, lo, hy - lz);
+            // Facing the driver coming up the road: the normal is against the direction of travel.
+            b.quad([c, a, V3(a.0, hi, a.2), V3(c.0, hi, c.2)], [[0.0, 1.0], [1.0, 1.0], [1.0, 0.0], [0.0, 0.0]], [1.0; 3], 1.0);
+            // Its post: two crossed dark strips from the ground to the face.
+            let foot = V3(hx, up - 0.2, hy);
+            let top = V3(hx, lo, hy);
+            for (dx, dz) in [(0.18, 0.0), (0.0, 0.18)] {
+                white.quad(
+                    [V3(foot.0 - dx, foot.1, foot.2 - dz), V3(top.0 - dx, top.1, top.2 - dz), V3(top.0 + dx, top.1, top.2 + dz), V3(foot.0 + dx, foot.1, foot.2 + dz)],
+                    [[0.0; 2]; 4],
+                    [0.22, 0.22, 0.24],
+                    1.0,
+                );
+            }
+        }
+        panels.push(b);
+    }
+
+    let mut meshes: Vec<Mesh> = vec![road.b.mesh(), grass.b.mesh(), white.mesh(), concrete.b.mesh()];
+    meshes.extend(panels.into_iter().map(Builder::mesh));
+    meshes.retain(|m| !m.verts.is_empty());
+    let triangles = meshes.iter().map(|m| m.verts.len() / 3).sum();
+    Scene { ground: g, meshes, sun, triangles }
+}
+
 pub fn build(track: &Track, look: &Look, photos: &Photos) -> Scene {
+    if !track.closed {
+        return open(track, look, photos);
+    }
     let g = ground(track, look);
     let sun = sun_dir(look);
     let r = rows(track, &g, look);
@@ -942,5 +1085,75 @@ mod tests {
         assert!(groove.verts.iter().take(600).all(|v| on_road(v.pos)));
         let alphas: Vec<f32> = groove.verts.iter().map(|v| v.color[3]).collect();
         assert!(alphas.iter().any(|a| *a > 0.8) && alphas.iter().any(|a| *a < 0.2), "strong on the line, faint at its edges");
+    }
+
+    fn roadcase_highway() -> (Track, TrackDef) {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../games/roadcase/tracks/roadcase-highway.ron");
+        let def: TrackDef = ron::from_str(&std::fs::read_to_string(path).expect("the highway file")).expect("a TrackDef");
+        let track = Track::new(&def).expect("the highway loads");
+        (track, def)
+    }
+
+    /// HRK-ROADCASE-HIGHWAY-001: the two arms are measured apart, each with its own length and end wall.
+    #[test]
+    fn the_roadcase_highway_forks_and_both_arms_are_measured_separately() {
+        let (t, _) = roadcase_highway();
+        assert!(!t.closed, "the slice ends at the fork: the road does not lap");
+        let fork = t.fork.as_ref().expect("the highway forks");
+        assert_eq!(fork.arms.len(), 2);
+        assert_eq!(fork.at, t.length, "the arms leave the road's end");
+        println!("main road: {:.1} m; fork at {:.1} m", fl(t.length), fl(fork.at));
+        for arm in &fork.arms {
+            println!(
+                "arm {:?}: {:.1} m, end ({:.1}, {:.1}) heading {:.1}°, walls left {:?} right {:?}, end wall {}",
+                arm.name,
+                fl(arm.length),
+                fl(arm.end.0),
+                fl(arm.end.1),
+                arm.end.2.signed().0 as f64 * 360.0 / sim_physics::TURN as f64,
+                arm.wall_left.map(fl),
+                arm.wall_right.map(fl),
+                arm.end_wall
+            );
+            assert!(arm.end_wall && arm.wall_right.is_some(), "each arm ends at a wall");
+        }
+        assert_ne!(fork.arms[0].length, fork.arms[1].length, "the arms are not the same road");
+        let (a, b) = (fork.arms[0].end, fork.arms[1].end);
+        let apart = ((a.0 - b.0) * (a.0 - b.0) + (a.1 - b.1) * (a.1 - b.1)).sqrt();
+        assert!(fl(apart) > 100.0, "the choices end {:.1} m apart", fl(apart));
+    }
+
+    /// HRK-ROADCASE-HIGHWAY-001: the open scene draws the road, both arms and the MEL billboards, and nothing
+    /// closes across the map.
+    #[test]
+    fn the_open_highway_scene_draws_the_arms_and_the_mel_billboards() {
+        let (t, mut def) = roadcase_highway();
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../games/roadcase");
+        let photo = |f: &str, size: f32| crate::drive::photos::Photo { file: f.into(), size };
+        let look = Look {
+            textures: std::collections::BTreeMap::from([
+                ("asphalt".to_string(), photo("race/asphalt.jpg", 4.0)),
+                ("sponsors".to_string(), photo("roadcase/mels.png", 4.0)),
+            ]),
+            billboards: vec![super::super::Billboard { at: 700.0, side: 9.0, height: 3.0 }, super::super::Billboard { at: 1900.0, side: 9.0, height: 3.0 }],
+            ..Look::default()
+        };
+        let photos = Photos::resolve(&dir, &look.textures);
+        let s = build(&t, &look, &photos);
+        let verts = |sc: &Scene, image: &str| sc.meshes.iter().filter(|m| m.image == image).map(|m| m.verts.len()).sum::<usize>();
+        assert!(verts(&s, "__drive_photo_asphalt") > 0, "the road surface");
+        assert!(verts(&s, "__drive_photo_sponsors") == 2 * 6, "one quad per billboard: {:?}", verts(&s, "__drive_photo_sponsors"));
+        assert!(s.meshes.last().map(|m| m.image.as_str()) != Some(FENCE), "an open road has no catch fence");
+        // The arms add road and end walls: the same highway without a fork is smaller.
+        let without = {
+            def.fork = None;
+            build(&Track::new(&def).unwrap(), &look, &photos)
+        };
+        assert!(verts(&s, "__drive_photo_asphalt") > verts(&without, "__drive_photo_asphalt"), "the arms are drawn");
+        assert!(verts(&s, CONCRETE) > verts(&without, CONCRETE), "the arms' end walls are drawn");
+        // The main road runs the whole length in rows, with no seam back to the start.
+        let road = s.meshes.iter().find(|m| m.image == "__drive_photo_asphalt").unwrap();
+        let max_x = road.verts.iter().map(|v| v.pos[0]).fold(f32::MIN, f32::max);
+        assert!(max_x > 2800.0, "the road reaches the fork at {max_x} m");
     }
 }

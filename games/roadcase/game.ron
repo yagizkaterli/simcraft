@@ -1,0 +1,64 @@
+#![enable(implicit_some)]
+// ROADCASE — the 90-second opening drive (design/90-second-opening-drive-spec.md): one continuous dusk highway,
+// the MEL'S DINER sign repeating, and a fork at the end. You drive car 1; the road is open (it does not lap):
+// `tracks/roadcase-highway.ron` ends at the fork and its two arms are measured separately.
+// Units: 1 m cells, so fine units are millimetres; speeds mm/s; accelerations mm/s².
+Game(
+    name: "roadcase",
+    perception: Direct,
+
+    kinds: {
+        // `route` is the fork decision: 0 not yet, 1 HIGHWAY 9 (left), 2 LANTERN MOTEL EXIT (right).
+        "car": (glyph: 'c', motion: (size: (1996, 4912)), vehicle: "stock_car",
+                props: { "human": 0, "stick": 0, "route": 0, "choice_s": 0, "choice_off": 0 }),
+    },
+
+    track: (file: "tracks/roadcase-highway.ron", origin: (100000, 1200000), grid: (spacing: 0, columns: 1, gap: 0)),
+
+    params: {
+        "player_id": 1, "player_slot": 1, "player_assist": 0,
+        // Line steering (GUIDED): mm a tick at full stick, and how far the line may run either side.
+        "line_rate": 60, "line_low": 4500, "line_high": 3500,
+        "player_pace": 300,
+        // The fork is at the end of the main road (measured: 2360.1 m; the arms are 746.6 m and 337.1 m). A car
+        // that reaches it chooses by the side of the centreline it is on: left (offset ≥ 0) is HIGHWAY 9, right
+        // is the motel exit.
+        "fork_at": 2300000,
+    },
+
+    rules: [
+        // First tick: one car, on the start line, in the player's hands.
+        (name: "grid", for: "car", when: "tick == 0",
+         then: [ Set("grid", "p.player_slot"), Set("human", "if me.id == p.player_id { 1 } else { 0 }"),
+                 Set("pilot", "p.player_assist"), Set("aids", "1"), Set("pace", "p.player_pace"), Set("line", "0") ]),
+        (name: "odometer", for: "car", when: "true", then: [ Set("last_s", "me.track_s") ]),
+        // The fork: once, on reaching it, remember which choice the car is taking.
+        (name: "fork_choice", for: "car", when: "me.route == 0 && me.track_s >= p.fork_at",
+         then: [ Set("route", "if me.track_off >= 0 { 1 } else { 2 }"), Set("choice_s", "me.track_s"),
+                 Set("choice_off", "me.track_off"), Emit("fork_choice") ]),
+        // GUIDED: the stick moves your line across the road; let go and the line stays.
+        (name: "groove", for: "car", when: "me.human == 1 && me.pilot == 2 && me.stick != 0",
+         then: [ Set("line", "clamp(me.line + me.stick * p.line_rate / 1000, -p.line_high, p.line_low)") ]),
+    ],
+
+    // The slice ends at the choice (spec: register the choice and end the slice cleanly): the result is the title
+    // card the spec names, and the simulation stops when it is reached.
+    end: [
+        (when: "prop_of(p.player_id, \"route\", 0) == 1", result: "HIGHWAY CONTINUES"),
+        (when: "prop_of(p.player_id, \"route\", 0) == 2", result: "MOTEL EXIT"),
+    ],
+
+    actions: [
+        (name: "shift", for: "car", args: ["dir"], when: "me.human == 1 && (arg.dir == 1 || arg.dir == -1)",
+         then: [ Set("manual", "1"), Set("shift", "arg.dir") ]),
+        (name: "drive", for: "car", args: ["throttle", "brake", "steer", "stick"], when: "me.human == 1",
+         then: [ Set("throttle", "clamp(arg.throttle, 0, 1000)"), Set("brake", "clamp(arg.brake, 0, 1000)"),
+                 Set("steer", "clamp(arg.steer, -1000, 1000)"), Set("stick", "clamp(arg.stick, -1000, 1000)") ]),
+        (name: "reverse", for: "car", args: ["on"], when: "me.human == 1 && (arg.on == 0 || arg.on == 1)",
+         then: [ Set("reverse", "arg.on") ]),
+        (name: "autopilot", for: "car", args: ["on"], when: "me.human == 1 && (arg.on == 0 || arg.on == 1)",
+         then: [ Set("pilot", "if arg.on == 1 { 1 } else { p.player_assist }"), Set("aids", "1") ]),
+        (name: "mode", for: "car", args: ["mode"], when: "me.human == 1 && (arg.mode == 0 || arg.mode == 1 || arg.mode == 2)",
+         then: [ Set("pilot", "arg.mode"), Set("aids", "1"), Set("line", "clamp(me.track_off, -p.line_high, p.line_low)") ]),
+    ],
+)
