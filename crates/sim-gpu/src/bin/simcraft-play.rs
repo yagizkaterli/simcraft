@@ -5,8 +5,12 @@
 //!   simcraft-play games/colony3d --bench N [--size 1600x900]     (N frames offscreen: where the time goes)
 //!   simcraft-play games/colony3d --shot out.png --record N [--press ACTION@FRAME]...   (N frames at 30 fps: out_000.png…)
 //!
+//! A game with a `roam.ron` is first person in a voxel world: WASD, the mouse (click to capture it; esc lets it
+//! go), shift runs, space jumps, walking into a wall climbs it, left click drops, right click digs, f smells.
+//! `--shot` there looks at the tallest thing built after `--ticks`; `--feel` prints how moving feels (FEEL.md).
+//! A game with a `drive.ron` is driven from the seat (c: cockpit → chase → top-down; `--view 2` starts top-down).
 //! A game with a `track.ron` plays in first person (keys: its buttons', e.g. 1–4, space, Enter; c camera view;
-//! p pauses; R replays the run, N starts a new one; `--view N` starts a shot in view N; `--replay runs/X.jsonl`
+//! p pauses; R or N starts a new run, V watches the run just ended again; `--view N` starts a shot in view N; `--replay runs/X.jsonl`
 //! plays a saved run, in a window or into `--shot`/`--record`). Runs are saved to `runs/<game>-<time>.jsonl`.
 //! Keys: space pause · +/- speed · tab next entity · c camera (close → wide → nest) · ←/→ pan · esc quit; the
 //! stage's buttons by mouse or by their own keys. The panel is `play.toml` when the game has one (the player's
@@ -19,19 +23,23 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use sim_core::{Engine, EntityId, Loaded, Running, World};
+use sim_gpu::drive::{Drive, DrivePlay, DrivePress};
 use sim_gpu::gpu::Gpu;
 use sim_gpu::gpu::World3;
+use sim_gpu::math::V3;
+use sim_gpu::roam::{Roam, RoamPlay, face_the_work};
 use sim_gpu::stage::{ButtonState, PileMemory, Quad, card, season_of};
-use sim_gpu::track::{Track, TrackPlay, load_run, save_run};
-use sim_gpu::{Camera, Composer, Stage, load_stage, load_track};
+use sim_gpu::track::{KeyIntent, Track, TrackPlay, load_run, save_run};
+use sim_gpu::walker::feel_probe;
+use sim_gpu::{Camera, Composer, Stage, load_roam, load_stage, load_track};
 use sim_render::Assets;
 use sim_render::feel::{CameraFeel, Spring, Tween};
 use sim_rules::Game;
 use winit::application::ApplicationHandler;
-use winit::event::{ElementState, WindowEvent};
+use winit::event::{DeviceEvent, DeviceId, ElementState, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
-use winit::keyboard::{Key, NamedKey};
-use winit::window::{Window, WindowId};
+use winit::keyboard::{Key, KeyCode, NamedKey, PhysicalKey};
+use winit::window::{CursorGrabMode, Window, WindowId};
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Shot {
@@ -367,6 +375,8 @@ struct Args {
     shot: Option<PathBuf>,
     ticks: u32,
     size: (u32, u32),
+    /// `--size` was given (else a track's `screen` shapes shots and the window).
+    sized: bool,
     camera: Shot,
     time: f32,
     bench: u32,
@@ -375,7 +385,24 @@ struct Args {
     press: Vec<String>,
     record: u32,
     view: usize,
+    /// A track's theme to start in (its name; `t` switches in the window).
+    theme: String,
     replay: Option<PathBuf>,
+    feel: bool,
+    /// Drive views: the autopilot drives your car (shots of a car at speed, hands-off laps).
+    auto: bool,
+    /// Drive views: ride on board this car (its entity id).
+    watch: Option<u64>,
+    /// Roam shots: close to a crawler instead of facing the work; or a camera placed by hand.
+    closeup: bool,
+    eye: Vec<f32>,
+    /// Frame drops: the window's budget (ms), a headless sweep (frames), a stress run (frames per level), a spike
+    /// report to rebuild and profile (and how many times).
+    budget: f64,
+    sweep: u64,
+    stress: u64,
+    repro: Option<PathBuf>,
+    times: u32,
 }
 
 fn args() -> Args {
@@ -387,6 +414,7 @@ fn args() -> Args {
         shot: None,
         ticks: 0,
         size: (1600, 900),
+        sized: false,
         camera: Shot::Close,
         time: 0.0,
         bench: 0,
@@ -394,7 +422,18 @@ fn args() -> Args {
         press: Vec::new(),
         record: 0,
         view: 0,
+        theme: String::new(),
         replay: None,
+        feel: false,
+        auto: false,
+        watch: None,
+        closeup: false,
+        eye: Vec::new(),
+        budget: 20.0,
+        sweep: 0,
+        stress: 0,
+        repro: None,
+        times: 30,
     };
     let mut it = std::env::args().skip(1);
     while let Some(x) = it.next() {
@@ -405,7 +444,18 @@ fn args() -> Args {
             "--shot" => a.shot = it.next().map(PathBuf::from),
             "--ticks" => a.ticks = it.next().and_then(|s| s.parse().ok()).unwrap_or(0),
             "--replay" => a.replay = it.next().map(PathBuf::from),
+            "--feel" => a.feel = true,
+            "--auto" => a.auto = true,
+            "--watch" => a.watch = it.next().and_then(|s| s.parse().ok()),
+            "--closeup" => a.closeup = true,
+            "--eye" => a.eye = it.next().map(|s| s.split(',').filter_map(|v| v.parse().ok()).collect()).unwrap_or_default(),
+            "--budget" => a.budget = it.next().and_then(|s| s.parse().ok()).unwrap_or(20.0),
+            "--sweep" => a.sweep = it.next().and_then(|s| s.parse().ok()).unwrap_or(1200),
+            "--stress" => a.stress = it.next().and_then(|s| s.parse().ok()).unwrap_or(300),
+            "--repro" => a.repro = it.next().map(PathBuf::from),
+            "--times" => a.times = it.next().and_then(|s| s.parse().ok()).unwrap_or(30),
             "--view" => a.view = it.next().and_then(|s| s.parse().ok()).unwrap_or(0),
+            "--theme" => a.theme = it.next().unwrap_or_default(),
             "--record" => a.record = it.next().and_then(|s| s.parse().ok()).unwrap_or(60),
             "--panel" => a.panel = it.next().map(PathBuf::from),
             "--press" => a.press.extend(it.next()),
@@ -414,6 +464,7 @@ fn args() -> Args {
             "--size" => {
                 if let Some((w, h)) = it.next().and_then(|s| s.split_once('x').map(|(w, h)| (w.parse().ok(), h.parse().ok()))) {
                     a.size = (w.unwrap_or(1600), h.unwrap_or(900));
+                    a.sized = true;
                 }
             }
             "--camera" => {
@@ -434,6 +485,16 @@ fn main() {
     let run = || -> Result<(), String> {
         let panel = panel_path(&a.dir, a.panel.as_deref());
         let engine = boot(&a.dir, a.seed, &panel)?;
+        if a.dir.join("roam.ron").exists() && a.stage.is_none() {
+            let (roam, assets) = load_roam(&a.dir)?;
+            return run_roam(engine, roam, assets, &a, &panel);
+        }
+        if a.dir.join("drive.ron").exists() && a.stage.is_none() {
+            let (drive, track) = sim_gpu::drive::load(&a.dir, engine.rules())?;
+            let (dir, seed, panel) = (a.dir.clone(), a.seed, panel);
+            let reboot: Reboot = Box::new(move || boot(&dir, seed, &panel));
+            return run_drive(engine, drive, track, &a, reboot);
+        }
         if a.dir.join("track.ron").exists() && a.stage.is_none() {
             let (track, assets) = load_track(&a.dir)?;
             let (dir, seed, panel) = (a.dir.clone(), a.seed, panel);
@@ -491,6 +552,13 @@ fn main() {
             reboot: None,
             script: None,
             saved: false,
+            grabbed: false,
+            theme: 0,
+            music: None,
+            swipe_from: None,
+            sound: None,
+            window_size: a.sized.then_some(a.size),
+            watch: None,
         };
         el.run_app(&mut app).map_err(|e| e.to_string())
     };
@@ -506,17 +574,44 @@ type Reboot = Box<dyn Fn() -> Result<Engine<Running, Game>, String>>;
 
 fn run_track(engine: Engine<Running, Game>, track: Track, assets: Assets, a: &Args, reboot: Reboot) -> Result<(), String> {
     let script = a.replay.as_deref().map(load_run).transpose()?;
+    let theme = match a.theme.as_str() {
+        "" => 0,
+        name => {
+            1 + track
+                .themes
+                .iter()
+                .position(|t| t.name == name)
+                .ok_or_else(|| format!("no theme '{name}' (themes: {:?})", track.themes.iter().map(|t| &t.name).collect::<Vec<_>>()))?
+        }
+    };
+    // How it feels, measured (FEEL.md): the run replayed headless at 60 frames a second, `--record` frames (600).
+    if a.feel {
+        let assets_sizes = assets.loaded.iter().map(|(n, i)| (n.clone(), (i.w as u32, i.h as u32))).collect();
+        let mut play = TrackPlay::new(engine, track, assets_sizes);
+        play.set_theme(theme);
+        play.script = script;
+        let frames = if a.record > 0 { a.record } else { 600 };
+        let report = sim_gpu::track::feel_probe(&mut play, frames, 60.0);
+        println!("{}", serde_json::to_string(&report).map_err(|e| e.to_string())?);
+        return Ok(());
+    }
     if let Some(out) = &a.shot {
         let instance = wgpu::Instance::default();
         let mut gpu = pollster::block_on(Gpu::new(&instance, None, None))?;
         upload_all(&mut gpu, &assets);
         let mut play = TrackPlay::new(engine, track, gpu.sizes.clone());
+        play.set_theme(theme);
         play.script = script;
+        play.replay_marks = false; // a recording of a run is the run, not a replay in a window
         play.step(a.ticks);
         // Effects of the warm-up ticks are over by the time the shot starts.
         play.rig.fx = Default::default();
         play.rig.view = a.view;
-        let (w, h) = a.size;
+        // A track shaped like a phone is shot like one (twice its logical size), unless `--size` says otherwise.
+        let (w, h) = match play.track.screen {
+            Some((sw, sh)) if !a.sized => (sw * 2, sh * 2),
+            _ => a.size,
+        };
         let presses: Vec<(String, u32)> = a
             .press
             .iter()
@@ -534,7 +629,7 @@ fn run_track(engine: Engine<Running, Game>, track: Track, assets: Assets, a: &Ar
                 }
             }
             if a.record > 0 {
-                clock += dt * rate * a.speed;
+                clock += dt * rate * a.speed * play.time_scale();
                 let n = clock.floor() as u32;
                 clock -= n as f32;
                 play.step(n);
@@ -544,7 +639,7 @@ fn run_track(engine: Engine<Running, Game>, track: Track, assets: Assets, a: &Ar
                 play.tween.alpha = 1.0;
             }
             let fr = play.frame(w as f32, h as f32, if a.record > 0 { dt } else { 0.0 });
-            let world = World3 { view_proj: fr.eye.view_proj(w as f32, h as f32), fog: fr.fog, meshes: &fr.meshes };
+            let world = World3::new(fr.eye.view_proj(w as f32, h as f32), fr.fog, &fr.meshes);
             let img = gpu.shot_scene(w, h, &fr.back, Some(world), &fr.front);
             let path = if a.record > 0 { PathBuf::from(format!("{}_{f:03}.png", stem.display())) } else { out.clone() };
             img.save(&path)?;
@@ -555,6 +650,7 @@ fn run_track(engine: Engine<Running, Game>, track: Track, assets: Assets, a: &Ar
     let rate = engine.rules().cfg.run.tick_rate as f32;
     let el = EventLoop::new().map_err(|e| e.to_string())?;
     el.set_control_flow(ControlFlow::Poll);
+    let window_size = if a.sized { Some(a.size) } else { track.screen };
     let mut app = App {
         play: Some(Start::Track(Box::new((engine, track)))),
         assets,
@@ -567,8 +663,483 @@ fn run_track(engine: Engine<Running, Game>, track: Track, assets: Assets, a: &Ar
         reboot: Some(reboot),
         script,
         saved: false,
+        grabbed: false,
+        theme,
+        music: Some(Music::new(&a.dir)),
+        swipe_from: None,
+        sound: None,
+        window_size,
+        watch: None,
     };
     el.run_app(&mut app).map_err(|e| e.to_string())
+}
+
+/// Driving from the seat (`drive.ron`): how it feels (numbers), a screenshot or a recording, or a window.
+fn run_drive(engine: Engine<Running, Game>, drive: Drive, track: sim_physics::Track, a: &Args, reboot: Reboot) -> Result<(), String> {
+    let script = a.replay.as_deref().map(sim_gpu::drive::load_run).transpose()?;
+    // How it feels, measured: the autopilot drives you (unless a replay does) at 60 frames a second.
+    if a.feel {
+        let mut play = DrivePlay::new(engine, drive, track);
+        play.auto_you = script.is_none();
+        play.script = script;
+        play.rig.view = a.view;
+        play.watch = a.watch;
+        let frames = if a.record > 0 { a.record } else { 2400 };
+        let report = sim_gpu::drive::feel_probe(&mut play, frames, 60.0);
+        println!("{}", serde_json::to_string(&report).map_err(|e| e.to_string())?);
+        return Ok(());
+    }
+    if a.bench > 0 {
+        return bench_drive(engine, drive, track, a);
+    }
+    if let Some(out) = &a.shot {
+        let instance = wgpu::Instance::default();
+        let mut gpu = pollster::block_on(Gpu::new(&instance, None, None))?;
+        let (w, h) = match drive.screen {
+            Some((sw, sh)) if !a.sized => (sw * 2, sh * 2),
+            _ => a.size,
+        };
+        let mut play = DrivePlay::new(engine, drive, track);
+        play.upload(&mut gpu);
+        play.auto_you = a.auto && script.is_none();
+        play.script = script;
+        play.rig.view = a.view;
+        play.watch = a.watch;
+        let rate = play.engine.rules().cfg.run.tick_rate as f32;
+        // Warm-up: the ticks asked for, with frames at 60 a second so the head and the horizon are where they would
+        // be in a window.
+        // (At least two ticks: a game places its cars on its first.)
+        let warm = (a.ticks.max(2) as f32 / rate * 60.0).ceil() as u32;
+        let mut clock = 0.0f32;
+        for _ in 0..warm {
+            clock += rate / 60.0;
+            let n = clock.floor() as u32;
+            clock -= n as f32;
+            play.step(n);
+            play.alpha = clock;
+            play.time += 1.0 / 60.0;
+            play.frame(w as f32, h as f32, 1.0 / 60.0);
+        }
+        play.time = play.time.max(a.time);
+        let frames = a.record.max(1);
+        let stem = out.with_extension("");
+        let dt = 1.0 / 30.0;
+        for f in 0..frames {
+            if a.record > 0 {
+                clock += dt * rate * a.speed;
+                let n = clock.floor() as u32;
+                clock -= n as f32;
+                play.step(n);
+                play.alpha = clock;
+                play.time += dt;
+            }
+            let fr = play.frame(w as f32, h as f32, if a.record > 0 { dt } else { 1.0 / 60.0 });
+            let img = play.shot(&mut gpu, w, h, &fr);
+            let path = if a.record > 0 { PathBuf::from(format!("{}_{f:03}.png", stem.display())) } else { out.clone() };
+            img.save(&path)?;
+        }
+        eprintln!("wrote {} ({frames} frame(s), {w}x{h}) at tick {} — {}", out.display(), play.world().tick, play.title(rate, false));
+        return Ok(());
+    }
+    let rate = engine.rules().cfg.run.tick_rate as f32;
+    let el = EventLoop::new().map_err(|e| e.to_string())?;
+    el.set_control_flow(ControlFlow::Poll);
+    let window_size = if a.sized { Some(a.size) } else { drive.screen };
+    let mut app = App {
+        play: Some(Start::Drive(Box::new((engine, drive, track, a.auto, script, a.view)))),
+        assets: Assets::default(),
+        window: None,
+        speed: rate * a.speed,
+        paused: false,
+        clock: 0.0,
+        last: Instant::now(),
+        cursor: (0.0, 0.0),
+        reboot: Some(reboot),
+        script: None,
+        saved: false,
+        grabbed: false,
+        theme: 0,
+        music: None,
+        swipe_from: None,
+        sound: None,
+        window_size,
+        watch: None,
+    };
+    el.run_app(&mut app).map_err(|e| e.to_string())
+}
+
+/// The drive view's whole frame, GPU included (`--bench N`): the autopilot drives you (`--watch`, `--view` as for
+/// shots), each frame rendered offscreen at the window's size (the mirror too) and waited for. Prints the mean of
+/// each part and the frame's p99 and how many frames went over 8 ms (the budget for 120 Hz).
+fn bench_drive(engine: Engine<Running, Game>, drive: Drive, track: sim_physics::Track, a: &Args) -> Result<(), String> {
+    let instance = wgpu::Instance::default();
+    let mut gpu = pollster::block_on(Gpu::new(&instance, None, None))?;
+    let (w, h) = match drive.screen {
+        Some(s) if !a.sized => s,
+        _ => a.size,
+    };
+    let mut play = DrivePlay::new(engine, drive, track);
+    play.upload(&mut gpu);
+    play.auto_you = true;
+    play.rig.view = a.view;
+    play.watch = a.watch;
+    let rate = play.engine.rules().cfg.run.tick_rate as f32;
+    let target = gpu.device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("bench"),
+        size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: gpu.format,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        view_formats: &[],
+    });
+    let view = target.create_view(&wgpu::TextureViewDescriptor::default());
+    let (mut sim, mut compose, mut draw, mut clock) = (0.0f64, 0.0f64, 0.0f64, 0.0f32);
+    let mut frames: Vec<f64> = Vec::new();
+    let dt = 1.0 / 60.0;
+    for f in 0..a.bench {
+        let whole = Instant::now();
+        let t = Instant::now();
+        clock += dt * rate * a.speed;
+        let n = clock.floor() as u32;
+        clock -= n as f32;
+        play.step(n);
+        play.alpha = clock;
+        play.time += dt;
+        sim += t.elapsed().as_secs_f64();
+        let t = Instant::now();
+        let fr = play.frame(w as f32, h as f32, dt);
+        compose += t.elapsed().as_secs_f64();
+        let t = Instant::now();
+        play.render(&mut gpu, &view, w, h, &fr);
+        let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+        draw += t.elapsed().as_secs_f64();
+        // After the first frames (pipelines and uploads warm up).
+        if f >= 30 {
+            frames.push(whole.elapsed().as_secs_f64() * 1000.0);
+        }
+    }
+    let per = |s: f64| s * 1000.0 / a.bench as f64;
+    frames.sort_by(f64::total_cmp);
+    let p99 = frames.get(frames.len() * 99 / 100).copied().unwrap_or(0.0);
+    let over = frames.iter().filter(|m| **m > 8.0).count();
+    eprintln!(
+        "{} frames at {w}x{h} (view {}): sim {:.3} ms, compose {:.3} ms, gpu {:.3} ms per frame; p99 {p99:.2} ms, over 8 ms: {over}, worst {:.2} ms (tick {})",
+        a.bench,
+        a.view,
+        per(sim),
+        per(compose),
+        per(draw),
+        frames.last().copied().unwrap_or(0.0),
+        play.world().tick
+    );
+    Ok(())
+}
+
+/// First person in a voxel world: how moving feels (numbers), a screenshot, or a window.
+fn run_roam(engine: Engine<Running, Game>, roam: Roam, assets: Assets, a: &Args, panel: &Path) -> Result<(), String> {
+    if let Some(file) = &a.repro {
+        return repro_roam(engine, roam, &assets, a, file);
+    }
+    if a.sweep > 0 {
+        return sweep_roam(&roam, &assets, a, panel);
+    }
+    if a.stress > 0 {
+        return stress_roam(&roam, &assets, a, panel);
+    }
+    if a.feel {
+        let report = feel_probe(roam.feel);
+        println!("{}", serde_json::to_string(&report).map_err(|e| e.to_string())?);
+        return Ok(());
+    }
+    if a.bench > 0 {
+        return bench_roam(engine, roam, &assets, a);
+    }
+    if let Some(out) = &a.shot {
+        let instance = wgpu::Instance::default();
+        let mut gpu = pollster::block_on(Gpu::new(&instance, None, None))?;
+        upload_all(&mut gpu, &assets);
+        let mut play = RoamPlay::new(engine, roam);
+        if a.camera == Shot::Wide {
+            play.overview =
+                Some(sim_gpu::math::Eye { pos: V3(0.0, 0.0, 0.0), target: V3(0.0, 0.0, 1.0), roll: 0.0, fov: 60.0, near: 0.1, far: 300.0 });
+        }
+        play.step(a.ticks);
+        play.tween.alpha = 1.0;
+        face_the_work(&mut play, 2);
+        if a.closeup {
+            sim_gpu::roam::close_up(&mut play, "termite");
+        }
+        // Any camera, for looking at one spot: --eye x,y,z,tx,ty,tz (view space: y up).
+        if let [x, y, z, tx, ty, tz] = a.eye[..] {
+            play.overview =
+                Some(sim_gpu::math::Eye { pos: V3(x, y, z), target: V3(tx, ty, tz), roll: 0.0, fov: 50.0, near: 0.02, far: 300.0 });
+        }
+        play.smell_on = a.press.iter().any(|p| p == "f");
+        // Settle the body on the ground before the picture.
+        for _ in 0..30 {
+            play.walk(1.0 / 60.0, Default::default());
+        }
+        let (w, h) = a.size;
+        let fr = play.frame(w as f32, h as f32, 1.0 / 60.0);
+        let world = play.world3(&mut gpu, &fr, w, h);
+        gpu.shot_scene(w, h, &fr.back, Some(world), &fr.front).save(out)?;
+        let tris: usize = fr.meshes.iter().chain(play.terrain().1).map(|m| m.verts.len() / 3).sum();
+        eprintln!("wrote {} ({w}x{h}) at tick {}, {tris} triangles — {}", out.display(), play.world().tick, play.title());
+        return Ok(());
+    }
+    let rate = engine.rules().cfg.run.tick_rate as f32;
+    let el = EventLoop::new().map_err(|e| e.to_string())?;
+    el.set_control_flow(ControlFlow::Poll);
+    let mut app = App {
+        play: Some(Start::Roam(Box::new((engine, roam)))),
+        assets,
+        window: None,
+        speed: rate * a.speed,
+        paused: false,
+        clock: 0.0,
+        last: Instant::now(),
+        cursor: (0.0, 0.0),
+        reboot: None,
+        script: None,
+        saved: false,
+        grabbed: false,
+        theme: 0,
+        music: None,
+        swipe_from: None,
+        sound: None,
+        window_size: None,
+        watch: Some((
+            sim_gpu::perf::Watch::new(a.budget, Some(PathBuf::from("runs/spikes"))),
+            0,
+            Instant::now(),
+            (a.dir.clone(), panel.to_path_buf(), a.seed),
+        )),
+    };
+    el.run_app(&mut app).map_err(|e| e.to_string())
+}
+
+fn headless_gpu(assets: &Assets) -> Result<Gpu, String> {
+    let instance = wgpu::Instance::default();
+    let mut gpu = pollster::block_on(Gpu::new(&instance, None, None))?;
+    upload_all(&mut gpu, assets);
+    Ok(gpu)
+}
+
+/// A spike report, rebuilt: the same state (checked by its hash), the same camera; the frame rendered `a.times`
+/// times, first cold (terrain not built yet, as after a rebuild) then warm, and the ticks before it timed again.
+fn repro_roam(engine: Engine<Running, Game>, roam: Roam, assets: &Assets, a: &Args, file: &Path) -> Result<(), String> {
+    use sim_gpu::perf::{Spike, replay};
+    let text = std::fs::read_to_string(file).map_err(|e| format!("{}: {e}", file.display()))?;
+    let spike: Spike = serde_json::from_str(&text).map_err(|e| format!("{}: {e}", file.display()))?;
+    eprintln!("spike: frame {} at tick {}, {:.2} ms: {}", spike.record.frame, spike.record.tick, spike.record.work_ms, spike.cause);
+    let mut play = replay(&spike, engine, roam)?;
+    eprintln!("state rebuilt: tick {}, hash {} (the same)", play.world().tick, spike.hash);
+    let mut gpu = headless_gpu(assets)?;
+    let (w, h) = a.size;
+    let target = sim_gpu::perf::offscreen(&gpu, w, h);
+    let mut runs = Vec::new();
+    for i in 0..a.times.max(2) {
+        play.stats = Default::default();
+        let t = Instant::now();
+        let fr = play.frame(w as f32, h as f32, 0.0);
+        let build = t.elapsed().as_secs_f64() * 1000.0;
+        let t = Instant::now();
+        play.render(&mut gpu, &target, w, h, &fr);
+        let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+        let draw = t.elapsed().as_secs_f64() * 1000.0;
+        if i == 0 {
+            eprintln!(
+                "cold (terrain built now): build {build:.2} ms (terrain {:.2} ms, {} vertices), draw {draw:.2} ms",
+                play.stats.terrain_ms, play.stats.terrain_verts
+            );
+        } else {
+            runs.push((build, draw, play.stats.verts, play.stats.bodies));
+        }
+    }
+    let med = |mut v: Vec<f64>| {
+        v.sort_by(f64::total_cmp);
+        v[v.len() / 2]
+    };
+    let (b, d) = (med(runs.iter().map(|r| r.0).collect()), med(runs.iter().map(|r| r.1).collect()));
+    eprintln!("warm, median of {}: build {b:.2} ms, draw {d:.2} ms, {} vertices, {} bodies", runs.len(), runs[0].2, runs[0].3);
+    // What every dig or drop costs once the GPU is warm: the terrain rebuilt and uploaded again.
+    let mut rebuilt = Vec::new();
+    for _ in 0..a.times.max(2) {
+        play.forget_terrain();
+        let t = Instant::now();
+        let fr = play.frame(w as f32, h as f32, 0.0);
+        let build = t.elapsed().as_secs_f64() * 1000.0;
+        let t = Instant::now();
+        play.render(&mut gpu, &target, w, h, &fr);
+        let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+        rebuilt.push((build, t.elapsed().as_secs_f64() * 1000.0));
+    }
+    let (rb, rd) = (med(rebuilt.iter().map(|r| r.0).collect()), med(rebuilt.iter().map(|r| r.1).collect()));
+    eprintln!("terrain rebuilt with the GPU warm, median: build {rb:.2} ms, draw {rd:.2} ms (the cost of a dig or a drop)");
+    // The ticks that frame ran, timed again from the state before them.
+    if spike.record.stats.ticks > 0 {
+        let back = sim_gpu::perf::Spike {
+            record: sim_gpu::perf::FrameRecord { tick: spike.record.tick - spike.record.stats.ticks as u64, ..spike.record.clone() },
+            ..spike.clone()
+        };
+        let engine = boot(&spike.game, spike.seed, &spike.panel)?;
+        let (roam, _) = load_roam(&spike.game)?;
+        let mut before = sim_gpu::perf::replay_to(&back, engine, roam)?;
+        let t = Instant::now();
+        before.step(spike.record.stats.ticks);
+        eprintln!("its {} tick(s) again: {:.2} ms", spike.record.stats.ticks, t.elapsed().as_secs_f64() * 1000.0);
+    }
+    Ok(())
+}
+
+/// The scripted player, twice, headless: spikes on the same frame with the same hash in both runs are the game's
+/// or the engine's (reports written for them); the others came from outside.
+fn sweep_roam(roam: &Roam, assets: &Assets, a: &Args, panel: &Path) -> Result<(), String> {
+    use sim_gpu::perf::{Watch, compare_runs, run_frames};
+    let mut gpu = headless_gpu(assets)?;
+    let mut watches = Vec::new();
+    for run in 0..2 {
+        let mut play = RoamPlay::new(boot(&a.dir, a.seed, panel)?, roam.clone());
+        play.step(a.ticks);
+        // The first run writes reports (runs/spikes/), so a spike can be rebuilt with --repro.
+        let mut watch = Watch::new(a.budget, (run == 0).then(|| PathBuf::from("runs/spikes")));
+        run_frames(&mut gpu, &mut play, a.sweep, a.size, &mut watch, None, (&a.dir, panel, a.seed));
+        eprintln!("run {}: {}", run + 1, watch.summary());
+        watches.push(watch);
+    }
+    let (both, once) = compare_runs(&watches[0], &watches[1]);
+    eprintln!("\nin both runs, same frame and hash ({}): the game's or the engine's", both.len());
+    for s in &both {
+        eprintln!("  frame {:5} tick {:5} hash {:016x}: {}", s.frame, s.tick, s.hash, s.cause);
+    }
+    eprintln!("in one run only ({}): from outside (OS, driver)", once.len());
+    Ok(())
+}
+
+/// Every load pushed through its levels (each drawn kind, the terrain, the shown field), `a.stress` frames each:
+/// where a load breaks the budget, and which phase breaks it.
+fn stress_roam(roam: &Roam, assets: &Assets, a: &Args, panel: &Path) -> Result<(), String> {
+    use sim_gpu::perf::{Watch, loads, run_frames};
+    let text = std::fs::read_to_string(panel).map_err(|e| format!("{}: {e}", panel.display()))?;
+    let base = |kind: &str| {
+        text.lines().find_map(|l| l.trim().strip_prefix(&format!("{kind} =")).and_then(|v| v.trim().parse::<u32>().ok())).unwrap_or(10)
+    };
+    let mut gpu = headless_gpu(assets)?;
+    println!(
+        "{:34} {:>9} {:>9} {:>9} {:>9} {:>8} {:>6}  worst phase",
+        "load", "tick p50", "work p50", "work p95", "work max", "verts", "over"
+    );
+    for levels in loads(roam, base) {
+        let mut broke = false;
+        for load in levels {
+            let started = Game::load_panel(&a.dir, &load.panel(&text)).and_then(|(mut world, game)| {
+                let terrain = game.def.terrain.clone().unwrap_or_default();
+                load.world(&mut world, &terrain, a.seed.unwrap_or(1));
+                Ok(Engine::<Loaded, _>::new(world, game).validate().map_err(|e| e.join("; "))?.start())
+            });
+            let engine = match started {
+                Ok(e) => e,
+                Err(e) => {
+                    println!("{:34} does not fit: {e}", load.describe());
+                    continue;
+                }
+            };
+            let mut play = RoamPlay::new(engine, roam.clone());
+            let mut watch = Watch::new(a.budget, None);
+            let smell = matches!(load, sim_gpu::perf::Load::Field(..)).then_some(true);
+            run_frames(&mut gpu, &mut play, a.stress, a.size, &mut watch, smell, (&a.dir, panel, a.seed));
+            let pct = |mut v: Vec<f64>, p: f64| {
+                v.sort_by(f64::total_cmp);
+                v[((v.len() - 1) as f64 * p).round() as usize]
+            };
+            let r = &watch.records;
+            let worst = r.iter().skip(30).max_by(|x, y| x.work_ms.total_cmp(&y.work_ms)).map(|x| x.cause()).unwrap_or_default();
+            let ticked: Vec<f64> = r.iter().filter(|x| x.stats.ticks > 0).map(|x| x.stats.ticks_ms / x.stats.ticks as f64).collect();
+            println!(
+                "{:34} {:>9.2} {:>9.2} {:>9.2} {:>9.2} {:>8} {:>6}  {worst}",
+                load.describe(),
+                if ticked.is_empty() { 0.0 } else { pct(ticked, 0.5) },
+                pct(r.iter().map(|x| x.work_ms).collect(), 0.5),
+                pct(r.iter().map(|x| x.work_ms).collect(), 0.95),
+                pct(r.iter().skip(30).map(|x| x.work_ms).collect(), 1.0),
+                r.iter().map(|x| x.stats.verts).max().unwrap_or(0),
+                watch.spikes.len(),
+            );
+            if !broke && pct(r.iter().map(|x| x.work_ms).collect(), 0.95) > a.budget {
+                println!("  ^ p95 over the {:.1} ms budget from here", a.budget);
+                broke = true;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Roam: `a.bench` frames offscreen at 60 fps, walking a circle while the colony builds (after `--ticks` of warm-up):
+/// where the time goes per frame (simulation, the body, building the frame, the GPU), and the frame's size.
+fn bench_roam(engine: Engine<Running, Game>, roam: Roam, assets: &Assets, a: &Args) -> Result<(), String> {
+    let instance = wgpu::Instance::default();
+    let mut gpu = pollster::block_on(Gpu::new(&instance, None, None))?;
+    upload_all(&mut gpu, assets);
+    let rate = engine.rules().cfg.run.tick_rate as f32;
+    let mut play = RoamPlay::new(engine, roam);
+    play.step(a.ticks);
+    let (w, h) = a.size;
+    let target = gpu.device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("bench"),
+        size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: gpu.format,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        view_formats: &[],
+    });
+    let view = target.create_view(&wgpu::TextureViewDescriptor::default());
+    let (mut sim, mut body, mut compose, mut draw, mut clock, mut tris) = (0.0f64, 0.0f64, 0.0f64, 0.0f64, 0.0f32, 0usize);
+    let mut worst = 0.0f64;
+    let dt = 1.0 / 60.0;
+    for f in 0..a.bench {
+        let whole = Instant::now();
+        let input = sim_gpu::walker::Input { forward: 1.0, look: (3.0, 0.0), ..Default::default() };
+        let t = Instant::now();
+        play.walk(dt, input);
+        body += t.elapsed().as_secs_f64();
+        let t = Instant::now();
+        clock += dt * rate * a.speed;
+        let n = clock.floor() as u32;
+        clock -= n as f32;
+        play.step(n);
+        play.tween.alpha = clock;
+        sim += t.elapsed().as_secs_f64();
+        let t = Instant::now();
+        let fr = play.frame(w as f32, h as f32, dt);
+        compose += t.elapsed().as_secs_f64();
+        tris = tris.max(fr.meshes.iter().chain(play.terrain().1).map(|m| m.verts.len() / 3).sum());
+        let t = Instant::now();
+        let world = play.world3(&mut gpu, &fr, w, h);
+        gpu.render(&view, w, h, &fr.back, Some(world), &fr.front);
+        let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+        draw += t.elapsed().as_secs_f64();
+        // After the first frames (pipelines and the first terrain upload warm up): the spikes a player feels.
+        if f >= 30 {
+            worst = worst.max(whole.elapsed().as_secs_f64());
+        }
+    }
+    let per = |s: f64| s * 1000.0 / a.bench as f64;
+    eprintln!(
+        "{} frames at {w}x{h}, up to {tris} triangles: sim {:.3} ms, body {:.3} ms, frame {:.3} ms, gpu {:.3} ms, worst frame {:.2} ms (tick {}, {} threads)",
+        a.bench,
+        per(sim),
+        per(body),
+        per(compose),
+        per(draw),
+        worst * 1000.0,
+        play.world().tick,
+        rayon::current_num_threads()
+    );
+    Ok(())
 }
 
 /// Where a finished run is kept: `runs/<game>-<unix seconds>.jsonl`.
@@ -580,18 +1151,259 @@ fn run_path(game: &str) -> PathBuf {
 enum Start {
     Stage(Box<(Engine<Running, Game>, Stage)>),
     Track(Box<(Engine<Running, Game>, Track)>),
+    Roam(Box<(Engine<Running, Game>, Roam)>),
+    /// The drive view, whether the autopilot drives you, a run to replay, the camera to start in.
+    Drive(Box<DriveStart>),
+}
+
+type DriveStart = (Engine<Running, Game>, Drive, sim_physics::Track, bool, Option<Vec<DrivePress>>, usize);
+
+/// A track's music: its current loop, found next to the game or in an `assets/` folder above it. No sound device,
+/// no music, no error: the game plays silently.
+struct Music {
+    sink: Option<rodio::MixerDeviceSink>,
+    player: Option<rodio::Player>,
+    playing: Option<String>,
+    muted: bool,
+    dir: PathBuf,
+}
+
+impl Music {
+    fn new(dir: &Path) -> Music {
+        let sink = rodio::DeviceSinkBuilder::open_default_sink().ok().map(|mut s| {
+            s.log_on_drop(false);
+            s
+        });
+        Music { sink, player: None, playing: None, muted: false, dir: dir.to_path_buf() }
+    }
+
+    /// Plays `want` on loop if it is not playing already (none = silence).
+    fn follow(&mut self, want: Option<&str>) {
+        let want = want.filter(|_| !self.muted);
+        if want == self.playing.as_deref() {
+            return;
+        }
+        if let Some(p) = self.player.take() {
+            p.stop();
+        }
+        self.playing = want.map(str::to_string);
+        let (Some(sink), Some(file)) = (&self.sink, want) else { return };
+        let path =
+            std::iter::once(self.dir.join(file)).chain(self.dir.ancestors().map(|a| a.join("assets").join(file))).find(|p| p.exists());
+        let Some(Ok(f)) = path.map(std::fs::File::open) else {
+            eprintln!("music: '{file}' not found next to the game or in an assets/ folder above it");
+            return;
+        };
+        match rodio::Decoder::new_looped(std::io::BufReader::new(f)) {
+            Ok(src) => {
+                let player = rodio::Player::connect_new(sink.mixer());
+                player.set_volume(0.6);
+                player.append(src);
+                self.player = Some(player);
+            }
+            Err(e) => eprintln!("music: {file}: {e}"),
+        }
+    }
+}
+
+/// The drive view's sound (`sound:` in drive.ron), in the host: the simulation never hears it, and a machine
+/// without a sound device plays silently. The mixer (`drive::mixer::Desk`) plays the engines and the effects on
+/// its buses; the spotter's lines and the music play beside it at their buses' levels. `drive::audio::Director`
+/// decides what plays each frame, `drive::audio::Radio` when the spotter speaks.
+struct DriveAudio {
+    sink: rodio::MixerDeviceSink,
+    _desk: rodio::Player,
+    shared: sim_gpu::drive::mixer::Shared,
+    director: sim_gpu::drive::audio::Director,
+    radio: sim_gpu::drive::audio::Radio,
+    /// Each spotter line's file and length (s), found once.
+    lines: std::collections::BTreeMap<String, (PathBuf, f32)>,
+    line: Option<rodio::Player>,
+    passby_peak: Option<f32>,
+    /// The music playing (its role), its player and its level now (it fades).
+    music: Option<(String, rodio::Player)>,
+    music_level: f32,
+    phase: sim_gpu::drive::audio::Phase,
+    muted: bool,
+}
+
+/// Every call and flag the spotter may say.
+const CALLS: [&str; 12] = [
+    "car_low",
+    "car_high",
+    "three_wide",
+    "still_there",
+    "clear",
+    "clear_low",
+    "clear_high",
+    "inside",
+    "green",
+    "white_flag",
+    "checkered",
+    "wreck",
+];
+
+fn open_audio(path: &Path) -> Option<rodio::Decoder<std::io::BufReader<std::fs::File>>> {
+    let f = std::fs::File::open(path).ok()?;
+    rodio::Decoder::new(std::io::BufReader::new(f)).ok()
+}
+
+impl DriveAudio {
+    fn new(p: &DrivePlay) -> Option<DriveAudio> {
+        use rodio::Source;
+        let s = &p.drive.sound;
+        let mut sink = rodio::DeviceSinkBuilder::open_default_sink().ok()?;
+        sink.log_on_drop(false);
+        let (bank, problems) = sim_gpu::drive::mixer::Bank::load(&p.drive.dir, s);
+        for e in problems {
+            eprintln!("sound: {e} (synthesised instead)");
+        }
+        let passby_peak = bank.passby_peak;
+        let shared = sim_gpu::drive::mixer::Shared::default();
+        let desk = rodio::Player::connect_new(sink.mixer());
+        desk.append(sim_gpu::drive::mixer::Desk::new(Arc::new(bank), shared.clone()));
+        let mut lines = std::collections::BTreeMap::new();
+        for call in CALLS.iter().map(|c| c.to_string()).chain(s.voice.lines.keys().cloned()) {
+            let Some(path) = s.voice.line(&p.drive.dir, &call) else { continue };
+            let Some(dec) = open_audio(&path) else { continue };
+            let len = dec.total_duration().map(|d| d.as_secs_f32()).unwrap_or_else(|| {
+                let (ch, rate) = (dec.channels().get() as f32, dec.sample_rate().get() as f32);
+                dec.count() as f32 / ch / rate
+            });
+            lines.insert(call, (path, len));
+        }
+        Some(DriveAudio {
+            sink,
+            _desk: desk,
+            shared,
+            director: Default::default(),
+            radio: Default::default(),
+            lines,
+            line: None,
+            passby_peak,
+            music: None,
+            music_level: 0.0,
+            phase: sim_gpu::drive::audio::Phase::Grid,
+            muted: false,
+        })
+    }
+
+    /// A new race: the flags again.
+    fn restart(&mut self) {
+        self.director = Default::default();
+        self.radio = Default::default();
+        self.phase = sim_gpu::drive::audio::Phase::Grid;
+    }
+
+    /// A frame: what the race sounds like now.
+    fn follow(&mut self, p: &DrivePlay, paused: bool, dt: f32) {
+        use sim_gpu::drive::audio::{Phase, Scene};
+        let s = &p.drive.sound;
+        let (you, others) = p.hearing();
+        let phase = p.phase();
+        let now = p.time;
+        // The flags: green as the field goes, checkered when it is over.
+        match (self.phase, phase) {
+            (Phase::Grid, Phase::Racing) => self.radio.announce("green", now),
+            (a, Phase::Finished) if a != Phase::Finished => self.radio.announce("checkered", now),
+            _ => {}
+        }
+        self.phase = phase;
+        let scene = Scene {
+            you,
+            others: &others,
+            stands: &p.stands,
+            time: now,
+            tick: p.world().tick,
+            phase,
+            paused,
+            passby_peak: self.passby_peak,
+        };
+        let (mut mix, wreck) = self.director.listen(s, &scene);
+        if let Some(w) = wreck {
+            self.radio.announce(w, now);
+        }
+        if self.muted {
+            mix.engine.gain = 0.0;
+            mix.others.iter_mut().for_each(|o| o.gain = 0.0);
+            (mix.squeal.0, mix.scrape, mix.wind.0, mix.crowd, mix.music_gain, mix.voice_gain) = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+            mix.shots.clear();
+        }
+        let (music, music_gain, voice_gain) = (mix.music.clone(), mix.music_gain, mix.voice_gain);
+        if let Ok(mut m) = self.shared.lock() {
+            // One-shots the audio thread has not taken yet stay queued.
+            let mut shots = std::mem::take(&mut m.shots);
+            shots.append(&mut mix.shots);
+            *m = sim_gpu::drive::audio::Mix { shots, ..mix };
+        }
+        // Music: a new piece starts silent and fades in; a piece that is no longer wanted fades out, then stops.
+        let want = music.filter(|r| s.role(&p.drive.dir, r).is_some());
+        if want.is_some() && self.music.as_ref().map(|m| &m.0) != want.as_ref() && self.music_level < 0.02 {
+            if let Some(m) = self.music.take() {
+                m.1.stop();
+            }
+            if let Some(role) = &want
+                && let Some(src) = s
+                    .role(&p.drive.dir, role)
+                    .and_then(|f| std::fs::File::open(f).ok())
+                    .and_then(|f| rodio::Decoder::new_looped(std::io::BufReader::new(f)).ok())
+            {
+                let player = rodio::Player::connect_new(self.sink.mixer());
+                player.set_volume(0.0);
+                player.append(src);
+                self.music = Some((role.clone(), player));
+            }
+        }
+        let target = if want.is_some() && self.music.as_ref().map(|m| &m.0) == want.as_ref() { music_gain } else { 0.0 };
+        self.music_level += (target - self.music_level) * (dt / 0.8).min(1.0);
+        if let Some((_, pl)) = &self.music {
+            pl.set_volume(self.music_level);
+        }
+        // The spotter.
+        let lines = &self.lines;
+        let say = self.radio.hear(p.last_hud.voice.as_deref(), now, &s.voice, |c| lines.get(c).map(|l| l.1));
+        if let Some(call) = say
+            && let Some(src) = self.lines.get(&call).and_then(|l| open_audio(&l.0))
+        {
+            let player = rodio::Player::connect_new(self.sink.mixer());
+            player.set_volume(voice_gain);
+            player.append(src);
+            self.line = Some(player);
+        }
+    }
+}
+/// A key's name for drive views (arrows, letters, space), from what it types.
+fn drive_key(k: &Key) -> Option<String> {
+    Some(match k.as_ref() {
+        Key::Named(NamedKey::ArrowUp) => "up".into(),
+        Key::Named(NamedKey::ArrowDown) => "down".into(),
+        Key::Named(NamedKey::ArrowLeft) => "left".into(),
+        Key::Named(NamedKey::ArrowRight) => "right".into(),
+        Key::Named(NamedKey::Space) => "space".into(),
+        Key::Named(NamedKey::Shift) => "shift".into(),
+        Key::Named(NamedKey::Enter) => "enter".into(),
+        Key::Named(NamedKey::Escape) => "esc".into(),
+        Key::Named(NamedKey::Backspace) => "backspace".into(),
+        Key::Named(NamedKey::Tab) => "tab".into(),
+        Key::Character(c) => c.to_lowercase(),
+        _ => return None,
+    })
 }
 
 /// What a window plays: a stage (side view) or a track (first person).
 enum Session {
     Stage(Box<Play>),
     Track(Box<TrackPlay>),
+    Roam(Box<RoamPlay>),
+    Drive(Box<DrivePlay>),
 }
 
 impl Session {
     fn advance(&mut self, dt: f32, paused: bool, clock: &mut f32, speed: f32) {
+        // A hitstop slows the world, not the camera.
+        let warp = if let Session::Track(p) = self { p.time_scale() } else { 1.0 };
         let (time, n) = {
-            *clock += if paused { 0.0 } else { dt * speed };
+            *clock += if paused { 0.0 } else { dt * speed * warp };
             let n = clock.floor() as u32;
             *clock -= n as f32;
             (dt, n.min(200))
@@ -607,6 +1419,19 @@ impl Session {
                 p.step(n);
                 p.tween.alpha = if paused { 1.0 } else { clock.clamp(0.0, 1.0) };
             }
+            Session::Drive(p) => {
+                p.time += time;
+                p.step(n);
+                p.alpha = if paused { 1.0 } else { clock.clamp(0.0, 1.0) };
+            }
+            // The body moves every frame; the game ticks at its rate and follows it.
+            Session::Roam(p) => {
+                let input = p.input;
+                p.input.look = (0.0, 0.0);
+                p.walk(time, input);
+                p.step(n);
+                p.tween.alpha = if paused { 1.0 } else { clock.clamp(0.0, 1.0) };
+            }
         }
     }
 
@@ -618,8 +1443,17 @@ impl Session {
             }
             Session::Track(p) => {
                 let fr = p.frame(w as f32, h as f32, dt);
-                let world = World3 { view_proj: fr.eye.view_proj(w as f32, h as f32), fog: fr.fog, meshes: &fr.meshes };
+                let world = World3::new(fr.eye.view_proj(w as f32, h as f32), fr.fog, &fr.meshes);
                 gpu.render(view, w, h, &fr.back, Some(world), &fr.front);
+            }
+            Session::Roam(p) => {
+                let fr = p.frame(w as f32, h as f32, dt);
+                let world = p.world3(gpu, &fr, w, h);
+                gpu.render(view, w, h, &fr.back, Some(world), &fr.front);
+            }
+            Session::Drive(p) => {
+                let fr = p.frame(w as f32, h as f32, dt);
+                p.render(gpu, view, w, h, &fr);
             }
         }
     }
@@ -628,6 +1462,8 @@ impl Session {
         match self {
             Session::Stage(p) => p.title(speed, paused),
             Session::Track(p) => p.title(speed, paused),
+            Session::Roam(p) => p.title(),
+            Session::Drive(p) => p.title(speed, paused),
         }
     }
 }
@@ -653,6 +1489,50 @@ struct App {
     reboot: Option<Reboot>,
     script: Option<Vec<sim_gpu::track::Press>>,
     saved: bool,
+    /// Roam: the mouse is captured (looking), else free (click to capture).
+    grabbed: bool,
+    /// A track's theme to start in.
+    theme: usize,
+    /// A track's music (a theme's loop).
+    music: Option<Music>,
+    /// Where a press (mouse or finger) started: its release decides the swipe.
+    swipe_from: Option<(f32, f32)>,
+    /// A drive view's sound: engines, effects, the spotter, music (none without a sound device).
+    sound: Option<DriveAudio>,
+    /// The window's logical size (a track's `screen`, or `--size`); none = the default.
+    window_size: Option<(u32, u32)>,
+    /// Roam: every frame measured against the budget; spike reports to `runs/spikes/` (game, panel, seed).
+    watch: Option<FrameWatch>,
+}
+
+/// The window's frame watch: the watch, the frame count, the last frame's start, and where the game came from
+/// (game, panel, seed) for its spike reports.
+type FrameWatch = (sim_gpu::perf::Watch, u64, Instant, (PathBuf, PathBuf, Option<u64>));
+
+/// A key's name as views write it ("w", "shift", "space"), by position on the keyboard, so WASD is WASD on any layout.
+fn key_name(k: PhysicalKey) -> Option<String> {
+    let PhysicalKey::Code(c) = k else { return None };
+    let s = format!("{c:?}");
+    Some(match c {
+        KeyCode::Space => "space".into(),
+        KeyCode::ShiftLeft | KeyCode::ShiftRight => "shift".into(),
+        KeyCode::ControlLeft | KeyCode::ControlRight => "ctrl".into(),
+        KeyCode::Tab => "tab".into(),
+        _ => s.strip_prefix("Key").or_else(|| s.strip_prefix("Digit"))?.to_lowercase(),
+    })
+}
+
+impl App {
+    fn grab(&mut self, on: bool) {
+        let Some(w) = &self.window else { return };
+        let ok =
+            !on || w.window.set_cursor_grab(CursorGrabMode::Locked).or_else(|_| w.window.set_cursor_grab(CursorGrabMode::Confined)).is_ok();
+        if !on {
+            let _ = w.window.set_cursor_grab(CursorGrabMode::None);
+        }
+        w.window.set_cursor_visible(!(on && ok));
+        self.grabbed = on && ok;
+    }
 }
 
 impl ApplicationHandler for App {
@@ -662,9 +1542,10 @@ impl ApplicationHandler for App {
         }
         let Some(start) = self.play.take() else { return };
         let window = Arc::new(
-            el.create_window(
-                Window::default_attributes().with_title("simcraft").with_inner_size(winit::dpi::LogicalSize::new(1440.0, 810.0)),
-            )
+            el.create_window(Window::default_attributes().with_title("simcraft").with_inner_size({
+                let (w, h) = self.window_size.unwrap_or((1440, 810));
+                winit::dpi::LogicalSize::new(w as f64, h as f64)
+            }))
             .expect("a window"),
         );
         let instance = wgpu::Instance::default();
@@ -693,8 +1574,25 @@ impl ApplicationHandler for App {
             Start::Track(b) => {
                 let (engine, track) = *b;
                 let mut p = TrackPlay::new(engine, track, gpu.sizes.clone());
+                p.set_theme(self.theme);
                 p.script = self.script.take();
                 Session::Track(Box::new(p))
+            }
+            Start::Roam(b) => {
+                let (engine, roam) = *b;
+                Session::Roam(Box::new(RoamPlay::new(engine, roam)))
+            }
+            Start::Drive(b) => {
+                let (engine, drive, track, auto, script, view) = *b;
+                let mut p = DrivePlay::new(engine, drive, track);
+                p.upload(&mut gpu);
+                p.rig.view = view;
+                p.auto_you = auto && script.is_none();
+                p.script = script;
+                // In the window the field waits on the grid for the green (the menu music plays).
+                p.green_at = p.drive.countdown;
+                self.sound = DriveAudio::new(&p);
+                Session::Drive(Box::new(p))
             }
         };
         self.window = Some(Window3 { window, surface, config, gpu, play });
@@ -703,8 +1601,120 @@ impl ApplicationHandler for App {
 
     fn window_event(&mut self, el: &ActiveEventLoop, _: WindowId, event: WindowEvent) {
         let Some(w) = self.window.as_mut() else { return };
+        if let Session::Roam(p) = &mut w.play {
+            match &event {
+                WindowEvent::KeyboardInput { event: k, .. } => {
+                    let down = k.state == ElementState::Pressed;
+                    if down && k.logical_key == Key::Named(NamedKey::Escape) {
+                        if self.grabbed {
+                            self.grab(false);
+                        } else {
+                            el.exit();
+                        }
+                        return;
+                    }
+                    if let Some(name) = key_name(k.physical_key) {
+                        let keys = &p.roam.keys;
+                        let axis = |on: bool| if on && down { 1.0 } else { 0.0 };
+                        let i = &mut p.input;
+                        if name == keys.forward || name == keys.back {
+                            i.forward = if name == keys.forward { axis(true) } else { -axis(true) };
+                        } else if name == keys.left || name == keys.right {
+                            i.strafe = if name == keys.right { axis(true) } else { -axis(true) };
+                        } else if name == keys.run {
+                            i.run = down;
+                        } else if name == keys.jump {
+                            i.jump = down;
+                        } else if name == keys.smell {
+                            p.smell_on = down;
+                        } else if name == "p" && down && !k.repeat {
+                            self.paused = !self.paused;
+                        }
+                    }
+                    return;
+                }
+                WindowEvent::MouseInput { state: ElementState::Pressed, button, .. } => {
+                    if !self.grabbed {
+                        self.grab(true);
+                    } else if *button == MouseButton::Left {
+                        p.use_target(false);
+                    } else if *button == MouseButton::Right {
+                        p.use_target(true);
+                    }
+                    return;
+                }
+                WindowEvent::Focused(false) => {
+                    p.input = Default::default();
+                    self.grab(false);
+                    return;
+                }
+                _ => {}
+            }
+        }
+        // Driving: held keys ramp the pedals and the wheel (the play turns them into the game's action); C swaps
+        // cockpit and chase, O hands your car to the autopilot, P pauses, R restarts, M mutes, Esc quits.
+        if let Some(Session::Drive(p)) = self.window.as_mut().map(|w| &mut w.play) {
+            match &event {
+                WindowEvent::KeyboardInput { event: k, .. } => {
+                    let Some(name) = drive_key(&k.logical_key) else { return };
+                    if k.state != ElementState::Pressed {
+                        p.held.remove(&name);
+                        return;
+                    }
+                    p.held.insert(name.clone());
+                    if k.repeat {
+                        return;
+                    }
+                    match name.as_str() {
+                        "esc" => el.exit(),
+                        "c" => p.cycle_view(),
+                        "tab" => p.watch_next(),
+                        "p" => self.paused = !self.paused,
+                        "o" => p.auto_you = !p.auto_you,
+                        "m" => {
+                            if let Some(s) = &mut self.sound {
+                                s.muted = !s.muted;
+                            }
+                        }
+                        "r" => {
+                            if let Some(Ok(engine)) = self.reboot.as_ref().map(|r| r()) {
+                                if !p.log.is_empty() {
+                                    let _ = sim_gpu::drive::save_run(&run_path(&p.engine.rules().def.name), &p.log);
+                                }
+                                p.restart(engine);
+                                self.clock = 0.0;
+                                if let Some(s) = &mut self.sound {
+                                    s.restart();
+                                }
+                            }
+                        }
+                        other => {
+                            p.key(other);
+                        }
+                    }
+                    return;
+                }
+                WindowEvent::Focused(false) => {
+                    p.held.clear();
+                    return;
+                }
+                _ => {}
+            }
+        }
+        let Some(w) = self.window.as_mut() else { return };
         match event {
-            WindowEvent::CloseRequested => el.exit(),
+            WindowEvent::CloseRequested => {
+                if let Session::Drive(p) = &w.play
+                    && !p.log.is_empty()
+                    && p.script.is_none()
+                {
+                    let path = run_path(&p.engine.rules().def.name);
+                    if sim_gpu::drive::save_run(&path, &p.log).is_ok() {
+                        eprintln!("run saved: {} (replay: --replay {})", path.display(), path.display());
+                    }
+                }
+                el.exit()
+            }
             WindowEvent::Resized(size) => {
                 w.config.width = size.width.max(1);
                 w.config.height = size.height.max(1);
@@ -716,6 +1726,7 @@ impl ApplicationHandler for App {
                 match &mut w.play {
                     Session::Stage(p) => p.hover(cw, ch, self.cursor.0, self.cursor.1),
                     Session::Track(p) => p.hover(cw, ch, self.cursor.0, self.cursor.1),
+                    Session::Roam(_) | Session::Drive(_) => {}
                 }
             }
             WindowEvent::MouseInput { state: ElementState::Pressed, button: winit::event::MouseButton::Left, .. } => {
@@ -726,8 +1737,56 @@ impl ApplicationHandler for App {
                             p.press(b);
                         }
                     }
-                    Session::Track(p) => p.click(cw, ch, self.cursor.0, self.cursor.1),
+                    // A track: a press on a button is a click; anywhere else it may become a swipe (on release).
+                    Session::Track(p) => {
+                        if p.track.buttons.iter().any(|b| b.hit(cw, ch, self.cursor.0, self.cursor.1)) {
+                            p.click(cw, ch, self.cursor.0, self.cursor.1);
+                        } else {
+                            self.swipe_from = Some(self.cursor);
+                        }
+                    }
+                    // Driving: a click on the mode button changes the play mode.
+                    Session::Drive(p) => {
+                        p.click(cw, ch, self.cursor.0, self.cursor.1);
+                    }
+                    Session::Roam(_) => {}
                 }
+            }
+            // A mouse drag is a swipe (the same code as a finger): its direction picks the move, a short one is a tap.
+            WindowEvent::MouseInput { state: ElementState::Released, button: winit::event::MouseButton::Left, .. } => {
+                if let (Session::Track(p), Some((x0, y0))) = (&mut w.play, self.swipe_from.take()) {
+                    let min = w.config.height as f32 * 0.035;
+                    p.swipe(sim_gpu::track::swipe_dir(self.cursor.0 - x0, self.cursor.1 - y0, min));
+                }
+            }
+            WindowEvent::Touch(t) => {
+                if let Session::Track(p) = &mut w.play {
+                    let at = (t.location.x as f32, t.location.y as f32);
+                    match t.phase {
+                        winit::event::TouchPhase::Started => self.swipe_from = Some(at),
+                        winit::event::TouchPhase::Ended => {
+                            if let Some((x0, y0)) = self.swipe_from.take() {
+                                let min = w.config.height as f32 * 0.035;
+                                p.swipe(sim_gpu::track::swipe_dir(at.0 - x0, at.1 - y0, min));
+                            }
+                        }
+                        winit::event::TouchPhase::Cancelled => self.swipe_from = None,
+                        winit::event::TouchPhase::Moved => {}
+                    }
+                }
+            }
+            // A key let go: its buttons' release actions (hold to crouch, hold to walk).
+            WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Released && matches!(w.play, Session::Track(_)) => {
+                let Session::Track(p) = &mut w.play else { return };
+                let name = match event.logical_key.as_ref() {
+                    Key::Named(NamedKey::Shift) => "shift".to_string(),
+                    Key::Named(NamedKey::Space) => "space".to_string(),
+                    Key::Named(NamedKey::ArrowUp) => "up".to_string(),
+                    Key::Named(NamedKey::ArrowDown) => "down".to_string(),
+                    Key::Character(c) => c.to_lowercase(),
+                    _ => return,
+                };
+                p.key_up(&name);
             }
             // First person: the track's keys go to its buttons (1–4, space, Enter...); p pauses, esc quits.
             WindowEvent::KeyboardInput { event, .. }
@@ -740,6 +1799,9 @@ impl ApplicationHandler for App {
                     Key::Named(NamedKey::Enter) => "enter".to_string(),
                     Key::Named(NamedKey::ArrowLeft) => "left".to_string(),
                     Key::Named(NamedKey::ArrowRight) => "right".to_string(),
+                    Key::Named(NamedKey::ArrowUp) => "up".to_string(),
+                    Key::Named(NamedKey::ArrowDown) => "down".to_string(),
+                    Key::Named(NamedKey::Shift) => "shift".to_string(),
                     Key::Character("p") => {
                         self.paused = !self.paused;
                         return;
@@ -748,29 +1810,40 @@ impl ApplicationHandler for App {
                         p.cycle_view();
                         return;
                     }
-                    // R: watch this run again from the start. N: a new run.
-                    Key::Character("r") | Key::Character("n") => {
-                        let replay = event.logical_key == Key::Character("r".into());
+                    // T: the next theme (the same run, another world). M: music off / on.
+                    Key::Character("t") => {
+                        let next = p.theme + 1;
+                        p.set_theme(next);
+                        return;
+                    }
+                    Key::Character("m") => {
+                        if let Some(m) = &mut self.music {
+                            m.muted = !m.muted;
+                        }
+                        return;
+                    }
+                    Key::Character(c) => c.to_lowercase(), // Shift+R is still R
+                    _ => return,
+                };
+                // What the key means is decided by the play (tested there): R and N start a new run, V watches the
+                // run just ended again, any game key after the end or during a replay plays.
+                match p.intent(&name) {
+                    KeyIntent::Press(k) => {
+                        p.key(&k);
+                    }
+                    KeyIntent::NewRun | KeyIntent::WatchAgain => {
+                        let watch = p.intent(&name) == KeyIntent::WatchAgain;
                         let Some(reboot) = &self.reboot else { return };
                         let Ok(engine) = reboot() else { return };
-                        let presses = p.script.clone().unwrap_or_else(|| p.log.clone());
                         if !self.saved && p.script.is_none() && !p.log.is_empty() {
                             let _ = save_run(&run_path(&p.engine.rules().def.name), &p.log);
                         }
                         self.saved = false;
-                        let mut fresh = TrackPlay::new(engine, p.track.clone(), p.sizes.clone());
-                        fresh.rig.view = p.rig.view;
-                        if replay {
-                            fresh.script = Some(presses);
-                        }
-                        **p = fresh;
+                        **p = p.restart(engine, watch);
                         self.clock = 0.0;
-                        return;
                     }
-                    Key::Character(c) => c.to_string(),
-                    _ => return,
-                };
-                p.key(&name);
+                    KeyIntent::None => {}
+                }
             }
             WindowEvent::KeyboardInput { event, .. }
                 if event.state == ElementState::Pressed
@@ -805,7 +1878,18 @@ impl ApplicationHandler for App {
                 let now = Instant::now();
                 let dt = now.duration_since(self.last).as_secs_f32().min(0.1);
                 self.last = now;
+                if let Session::Roam(p) = &mut w.play {
+                    p.stats = Default::default();
+                }
+                let t = Instant::now();
                 w.play.advance(dt, self.paused, &mut self.clock, self.speed);
+                if let (Session::Track(p), Some(m)) = (&w.play, &mut self.music) {
+                    m.follow(p.track.music.as_deref());
+                }
+                if let (Session::Drive(p), Some(s)) = (&w.play, &mut self.sound) {
+                    s.follow(p, self.paused, dt);
+                }
+                let advance_ms = t.elapsed().as_secs_f64() * 1000.0;
                 // A run that just ended is kept, so it can be replayed later (`--replay`).
                 if let Session::Track(p) = &w.play
                     && p.engine.outcome().is_some()
@@ -819,6 +1903,7 @@ impl ApplicationHandler for App {
                     self.saved = true;
                 }
                 let (cw, ch) = (w.config.width, w.config.height);
+                let t = Instant::now();
                 match w.surface.get_current_texture() {
                     wgpu::CurrentSurfaceTexture::Success(frame) | wgpu::CurrentSurfaceTexture::Suboptimal(frame) => {
                         let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -828,9 +1913,47 @@ impl ApplicationHandler for App {
                     wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => {}
                     _ => w.surface.configure(&w.gpu.device, &w.config),
                 }
+                let draw_all_ms = t.elapsed().as_secs_f64() * 1000.0;
+                let t = Instant::now();
                 w.window.set_title(&w.play.title(self.speed, self.paused));
+                let window_ms = t.elapsed().as_secs_f64() * 1000.0;
+                if let (Session::Roam(p), Some((watch, frame, prev, source))) = (&w.play, self.watch.as_mut()) {
+                    let s = p.stats.clone();
+                    let rec = sim_gpu::perf::FrameRecord {
+                        frame: *frame,
+                        tick: p.world().tick,
+                        walk_ms: (advance_ms - s.ticks_ms).max(0.0),
+                        draw_ms: (draw_all_ms - s.build_ms).max(0.0),
+                        window_ms,
+                        work_ms: now.elapsed().as_secs_f64() * 1000.0,
+                        interval_ms: now.duration_since(*prev).as_secs_f64() * 1000.0,
+                        stats: s,
+                    };
+                    *prev = now;
+                    *frame += 1;
+                    if let Some(path) = watch.frame(rec, p, (&source.0, &source.1, source.2)) {
+                        eprintln!("frame over budget: {} ({})", path.display(), watch.spikes.last().map_or("", |s| s.1.as_str()));
+                    }
+                }
             }
             _ => {}
+        }
+    }
+
+    /// Raw mouse movement (not the cursor): looking around in first person, while the mouse is captured.
+    fn device_event(&mut self, _: &ActiveEventLoop, _: DeviceId, event: DeviceEvent) {
+        if let (true, Some(w), DeviceEvent::MouseMotion { delta }) = (self.grabbed, self.window.as_mut(), event)
+            && let Session::Roam(p) = &mut w.play
+        {
+            p.input.look.0 += delta.0 as f32;
+            p.input.look.1 += delta.1 as f32;
+        }
+    }
+
+    /// Roam: how the frames went (percentiles, spikes and their reports).
+    fn exiting(&mut self, _: &ActiveEventLoop) {
+        if let Some((watch, ..)) = &self.watch {
+            eprintln!("{}", watch.summary());
         }
     }
 

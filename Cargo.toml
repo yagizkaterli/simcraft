@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/sim-core", "crates/sim-state", "crates/sim-rules", "crates/sim-agent", "crates/sim-ffi", "crates/sim-render", "crates/sim-gpu", "kernel", "test"]
+members = ["crates/sim-core", "crates/sim-physics", "crates/sim-mobile", "crates/sim-state", "crates/sim-rules", "crates/sim-agent", "crates/sim-ffi", "crates/sim-render", "crates/sim-gpu", "kernel", "test"]
 
 [workspace.package]
 edition = "2024"
@@ -9,6 +9,7 @@ license = "MIT"
 
 [workspace.dependencies]
 sim-core = { path = "crates/sim-core" }
+sim-physics = { path = "crates/sim-physics" }
 sim-rules = { path = "crates/sim-rules" }
 sim-state = { path = "crates/sim-state" }
 sim-kernel = { path = "kernel" }
@@ -20,6 +21,7 @@ toml = "1"
 # sync: rules are evaluated on multiple cores
 rhai = { version = "1.26", features = ["no_float", "only_i64", "sync"] }
 rayon = "1.12"
+gltf = { version = "1.4", default-features = false, features = ["import", "utils", "names", "image_jpeg_rayon"] }
 
 # Lean debug builds: our code keeps line numbers (readable panics and backtraces), dependencies carry no debug
 # info at all. A debug test build is several times smaller and links faster; step into a dependency with a

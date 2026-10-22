@@ -87,8 +87,10 @@ fn bump(c: &AtomicU64) {
     c.fetch_add(1, Ordering::Relaxed);
 }
 
-/// A core takes this many entities as one chunk; small worlds pay no parallel overhead.
-const CHUNK: usize = 64;
+/// A core takes at least this many entities as one job; below `PARALLEL_FROM` entities with something to evaluate
+/// (idle kinds cost nothing), a tick stays on one core: small worlds pay no parallel overhead.
+const CHUNK: usize = 16;
+const PARALLEL_FROM: usize = 48;
 
 /// Context seen by world queries registered in Rhai (`around`, `rand`).
 /// Each core has its own context (thread-local): the world being read, `me`, salt.
@@ -140,14 +142,43 @@ impl QueryCtx {
         Ok(w.field(name, x + dx, y + dy, z + dz).unwrap_or(0))
     }
 
+    /// Footprint gap to the nearest moving `kind` ahead (`dir` 1) or behind (-1), my extent shifted `dx` across.
+    fn gap(&self, kind: &str, dx: i64, dir: i64) -> i64 {
+        self.counted();
+        self.world().map_or(sim_core::FAR, |w| w.gap(self.me, kind, dx, dir))
+    }
+
+    /// Who the footprint gap is to (0 if nobody): read its speed with `prop_of`.
+    fn gap_id(&self, kind: &str, dx: i64, dir: i64) -> i64 {
+        self.counted();
+        self.world().map_or(0, |w| w.gap_to(self.me, kind, dx, dir).1 as i64)
+    }
+
+    fn touching(&self, kind: &str) -> i64 {
+        self.counted();
+        self.world().map_or(0, |w| w.touching(self.me, kind))
+    }
+
+    fn under(&self, kind: &str) -> i64 {
+        self.counted();
+        self.world().map_or(0, |w| w.under(self.me, kind))
+    }
+
+    /// A prop of any entity by id (`under(...)` gives one); `default` if it is gone or has no such prop.
+    fn prop_of(&self, id: i64, prop: &str, default: i64) -> i64 {
+        self.counted();
+        let Some(w) = self.world() else { return default };
+        w.get(id.max(0) as EntityId).and_then(|e| e.props.get(prop).copied()).unwrap_or(default)
+    }
+
     /// A prop of the nearest `kind` within `r`; `default` if there is none that close.
     fn nearest_prop(&self, kind: &str, prop: &str, r: i64, default: i64) -> i64 {
         self.counted();
         let Some(w) = self.world() else { return default };
         let Some(me) = w.get(self.me) else { return default };
-        match w.nearest(me, kind) {
-            Some((e, d)) if d <= r => e.props.get(prop).copied().unwrap_or(default),
-            _ => default,
+        match w.nearest_within(me, kind, r, |_| true) {
+            Some((e, _)) => e.props.get(prop).copied().unwrap_or(default),
+            None => default,
         }
     }
 
@@ -201,6 +232,110 @@ impl QueryCtx {
 
 thread_local! {
     static CTX: RefCell<QueryCtx> = RefCell::new(QueryCtx::default());
+    /// What compiled expressions read on this thread right now (the native shadow of the interpreter's scope):
+    /// set where the scope gets `me`, `sense`, `it`, `roll`; none = compiled expressions are not used here.
+    static NENV: RefCell<Option<NEnv>> = const { RefCell::new(None) };
+}
+
+/// The native shadow of an evaluation scope. Pointers to entities and senses live exactly as long as the scope they
+/// shadow (set and restored around the same calls; see `NScope`).
+#[derive(Clone)]
+struct NEnv {
+    me: NonNull<Entity>,
+    it: Option<(NonNull<Entity>, i64)>,
+    sense: Vec<(String, crate::native::Val)>,
+    roll: Option<i64>,
+    tick: Option<i64>,
+    tick_rate: i64,
+    /// The interpreter scope has no `me`, `sense` or `it` (a bare kind): a fallback builds them for itself.
+    bare: bool,
+}
+
+/// Restores the previous native shadow when dropped.
+struct NScope(Option<NEnv>);
+
+impl Drop for NScope {
+    fn drop(&mut self) {
+        NENV.with(|n| *n.borrow_mut() = self.0.take());
+    }
+}
+
+/// Makes compiled expressions see `env` until the guard drops.
+fn nscope(env: Option<NEnv>) -> NScope {
+    NScope(NENV.with(|n| std::mem::replace(&mut *n.borrow_mut(), env)))
+}
+
+/// Changes one part of the current shadow (if there is one) until the guard drops.
+fn nset(f: impl FnOnce(&mut NEnv)) -> NScope {
+    NScope(NENV.with(|n| {
+        let prev = n.borrow().clone();
+        if let Some(e) = n.borrow_mut().as_mut() {
+            f(e);
+        }
+        prev
+    }))
+}
+
+fn field(e: &Entity, f: &str) -> Option<i64> {
+    e.props.get(f).copied().or(match f {
+        "x" => Some(e.x),
+        "y" => Some(e.y),
+        "z" => Some(e.z),
+        "id" => Some(e.id as i64),
+        _ => None,
+    })
+}
+
+impl crate::native::Env for NEnv {
+    fn me(&self, f: &str) -> Option<i64> {
+        // SAFETY: set from a live `&Entity` for the duration of the scope it shadows (see `NEnv`).
+        field(unsafe { self.me.as_ref() }, f)
+    }
+    fn it(&self, f: &str) -> Option<i64> {
+        let (e, d) = self.it?;
+        // SAFETY: as `me`.
+        let e = unsafe { e.as_ref() };
+        if f == "dist" { Some(d) } else { field(e, f) }
+    }
+    fn arg(&self, _: &str) -> Option<i64> {
+        None
+    }
+    fn sense(&self, f: &str) -> Option<crate::native::Val> {
+        self.sense.iter().find(|(n, _)| n == f).map(|(_, v)| *v)
+    }
+    fn var(&self, f: &str) -> Option<i64> {
+        match f {
+            "roll" => self.roll,
+            "tick" => self.tick,
+            _ => None,
+        }
+    }
+    fn call(&self, f: crate::native::Func, args: &[crate::native::Arg]) -> Option<crate::native::Val> {
+        use crate::native::{Arg::S, Arg::V, Func as F, Val::B, Val::I};
+        CTX.with(|c| {
+            Some(match (f, args) {
+                (F::Ahead, [S(k)]) => I(c.borrow().gap(k, 0, 1)),
+                (F::Ahead, [S(k), V(I(dx))]) => I(c.borrow().gap(k, *dx, 1)),
+                (F::Behind, [S(k)]) => I(c.borrow().gap(k, 0, -1)),
+                (F::Behind, [S(k), V(I(dx))]) => I(c.borrow().gap(k, *dx, -1)),
+                (F::AheadId, [S(k)]) => I(c.borrow().gap_id(k, 0, 1)),
+                (F::AheadId, [S(k), V(I(dx))]) => I(c.borrow().gap_id(k, *dx, 1)),
+                (F::BehindId, [S(k)]) => I(c.borrow().gap_id(k, 0, -1)),
+                (F::BehindId, [S(k), V(I(dx))]) => I(c.borrow().gap_id(k, *dx, -1)),
+                (F::Touching, [S(k)]) => I(c.borrow().touching(k)),
+                (F::Under, [S(k)]) => I(c.borrow().under(k)),
+                (F::PropOf, [V(I(id)), S(p), V(I(d))]) => I(c.borrow().prop_of(*id, p, *d)),
+                (F::NearestProp, [S(k), S(p), V(I(r)), V(I(d))]) => I(c.borrow().nearest_prop(k, p, *r, *d)),
+                (F::Around, [S(k), V(I(r))]) => I(c.borrow().around(k, None, *r)),
+                (F::Around, [S(k), S(st), V(I(r))]) => I(c.borrow().around(k, Some(st), *r)),
+                (F::InState, [S(sel)]) => B(sim_state::in_label(&c.borrow().state, sel)),
+                (F::Rand, [V(I(n))]) => I(c.borrow_mut().rand(*n)),
+                (F::Pace, [V(I(n))]) => B(c.borrow().pace(*n, 1, self.tick_rate)),
+                (F::Pace, [V(I(n)), V(I(secs))]) => B(c.borrow().pace(*n, *secs, self.tick_rate)),
+                _ => return None,
+            })
+        })
+    }
 }
 
 /// A world lent to this thread's queries; the lifetime keeps the world alive and unchanged while it is bound.
@@ -227,7 +362,7 @@ pub struct Game {
     /// Rules first, then actions (`is_action`). Salts are assigned in this order.
     rules: Vec<CompiledRule>,
     ends: Vec<CompiledEnd>,
-    score: Option<AST>,
+    score: Option<Ex>,
     compile_errors: Vec<String>,
     /// None = single core.
     pool: Option<Pool>,
@@ -236,7 +371,7 @@ pub struct Game {
     /// Kind → chart (kinds that have a machine).
     kind_charts: Arc<BTreeMap<String, Arc<StateChart>>>,
     /// Condition/score expressions and action blocks of the charts.
-    exprs: Vec<AST>,
+    exprs: Vec<Ex>,
     /// `exprs[i]` checked natively, when it is a simple condition (see `native_guard`).
     expr_guards: Vec<Option<Vec<Term>>>,
     blocks: Vec<Vec<CDo>>,
@@ -245,9 +380,9 @@ pub struct Game {
     /// `perception: Senses`: kinds see external reality only through their senses.
     strict: bool,
     /// Fields pinned onto level 0 every tick: (field, world-level expression).
-    field_tops: Vec<(String, AST)>,
+    field_tops: Vec<(String, Ex)>,
     /// Kind → its senses (name, expression).
-    senses: BTreeMap<String, Vec<(String, AST)>>,
+    senses: BTreeMap<String, Vec<(String, Ex)>>,
     /// Kind → its brain (learning agents).
     brains: BTreeMap<String, Arc<Brain>>,
     /// Work done so far (see `work`).
@@ -260,6 +395,9 @@ pub struct Game {
     natives: BTreeMap<String, Arc<dyn NativeEnv>>,
     /// Kind → state text at birth.
     initial_states: BTreeMap<String, String>,
+    /// Vehicle kinds → their car, and the surface they drive on (read with the game's files).
+    vehicles: BTreeMap<String, sim_core::sim_physics::VehicleDef>,
+    surface: Option<sim_core::Surface>,
     /// Definitions of rules written inside states (in `rules` order, for validation).
     machine_rules: Vec<RuleDef>,
     /// The `near.<kind>`s expressions actually read. None = all (could not be determined).
@@ -285,11 +423,11 @@ struct CompiledRule {
     bind: BTreeMap<String, Vec<NodeId>>,
     target: Option<Target>,
     args: Vec<String>,
-    when: Option<AST>,
+    when: Option<Ex>,
     /// `when`, checked natively when it is simple (see `native_guard`).
     guard: Option<Vec<Term>>,
     then: Vec<CDo>,
-    script: Option<AST>,
+    script: Option<Ex>,
     /// Which per-entity names its expressions mention.
     sees: Sees,
 }
@@ -304,10 +442,13 @@ struct Plan {
     guarded: bool,
     /// Which per-entity maps to build.
     sees: Sees,
+    /// Everything this kind evaluates is compiled (`crate::native`): no interpreter scope is built for it (no `me`,
+    /// `sense` or `it` maps); if a compiled expression falls back, the maps are made for that one expression.
+    bare: bool,
 }
 
 impl Plan {
-    const FULL: Plan = Plan { idle: false, guarded: false, sees: Sees { me: true, near: true } };
+    const FULL: Plan = Plan { idle: false, guarded: false, sees: Sees { me: true, near: true }, bare: false };
 }
 
 /// Does a piece of source mention `me` / `near`? Read from the text, so it can only err towards building
@@ -334,37 +475,38 @@ impl Sees {
 }
 
 enum CDo {
-    Set(String, AST),
-    Add(String, AST),
+    Set(String, Ex),
+    Add(String, Ex),
     Emit(String),
     Despawn(Target),
     Spawn(String),
+    SpawnAt(String, Ex, Ex),
     MoveToward(String),
     MoveAway(String),
     Climb(String, String),
     Wander,
     Goto(String),
-    Move(AST, AST),
-    Move3(AST, AST, AST),
-    MoveBy(AST, AST),
-    SetField(String, AST),
-    AddField(String, AST),
-    SetFieldAt(String, AST, AST, AST, AST),
+    Move(Ex, Ex),
+    Move3(Ex, Ex, Ex),
+    MoveBy(Ex, Ex),
+    SetField(String, Ex),
+    AddField(String, Ex),
+    SetFieldAt(String, Ex, Ex, Ex, Ex),
     ClimbField(String),
     On(Target, Vec<CDo>),
-    Need(String, AST),
+    Need(String, Ex),
     Interrupt(String),
     Back,
 }
 
 impl CDo {
     /// Number expressions to evaluate in this action (and nested `On` blocks).
-    fn int_exprs<'a>(&'a self, out: &mut Vec<&'a AST>) {
+    fn int_exprs<'a>(&'a self, out: &mut Vec<&'a Ex>) {
         match self {
             CDo::Set(_, a) | CDo::Add(_, a) | CDo::Need(_, a) => out.push(a),
             CDo::Move(dx, dy) => out.extend([dx, dy]),
             CDo::Move3(dx, dy, dz) => out.extend([dx, dy, dz]),
-            CDo::MoveBy(dx, dy) => out.extend([dx, dy]),
+            CDo::MoveBy(dx, dy) | CDo::SpawnAt(_, dx, dy) => out.extend([dx, dy]),
             CDo::SetField(_, a) | CDo::AddField(_, a) => out.push(a),
             CDo::SetFieldAt(_, dx, dy, dz, v) => out.extend([dx, dy, dz, v]),
             CDo::On(_, ds) => ds.iter().for_each(|d| d.int_exprs(out)),
@@ -374,7 +516,7 @@ impl CDo {
 }
 
 struct CompiledEnd {
-    when: AST,
+    when: Ex,
     result: String,
 }
 
@@ -384,18 +526,46 @@ struct Who<'a> {
     it: Option<&'a Entity>,
 }
 
+/// A rule expression: the interpreter's AST, and its native form when it is in the compiled subset
+/// (`crate::native`). Everything that reads an `Ex` as an `AST` still works (the interpreter path).
+struct Ex {
+    ast: AST,
+    native: Option<crate::native::Compiled>,
+    /// The source, for `SIMCRAFT_NATIVE_CHECK` reports.
+    src: String,
+}
+
+/// `SIMCRAFT_NATIVE_CHECK=1`: every compiled answer is also asked of the interpreter, and a difference stops the
+/// program with the expression and both answers (a debugging aid for the compiler, not for games).
+fn native_check() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("SIMCRAFT_NATIVE_CHECK").is_some())
+}
+
+impl std::ops::Deref for Ex {
+    type Target = AST;
+    fn deref(&self) -> &AST {
+        &self.ast
+    }
+}
+
 /// Compiles source texts to AST, collecting errors (does not stop at the first).
 struct Compiler<'a> {
     rhai: &'a Rhai,
     errors: Vec<String>,
+    /// The game's params and tick rate: `p.*` and `tick_rate` are constants in compiled expressions.
+    params: BTreeMap<String, i64>,
+    tick_rate: i64,
 }
 
 impl Compiler<'_> {
-    fn expr(&mut self, src: &str, ctx: &str) -> AST {
-        self.rhai.compile_expression(src).unwrap_or_else(|e| {
+    fn expr(&mut self, src: &str, ctx: &str) -> Ex {
+        let ast = self.rhai.compile_expression(src).unwrap_or_else(|e| {
             self.errors.push(format!("{ctx}: `{src}`: {e}"));
             AST::empty()
-        })
+        });
+        let native = crate::native::compile(src, &self.params, self.tick_rate);
+        Ex { ast, native, src: src.to_string() }
     }
 
     fn doo(&mut self, d: &Do, ctx: &str) -> CDo {
@@ -405,6 +575,7 @@ impl Compiler<'_> {
             Do::Emit(n) => CDo::Emit(n.clone()),
             Do::Despawn(t) => CDo::Despawn(t.clone()),
             Do::Spawn(k) => CDo::Spawn(k.clone()),
+            Do::SpawnAt(k, dx, dy) => CDo::SpawnAt(k.clone(), self.expr(dx, ctx), self.expr(dy, ctx)),
             Do::MoveToward(k) => CDo::MoveToward(k.clone()),
             Do::MoveAway(k) => CDo::MoveAway(k.clone()),
             Do::Climb(k, prop) => CDo::Climb(k.clone(), prop.clone()),
@@ -429,10 +600,11 @@ impl Compiler<'_> {
     fn rule(&mut self, r: &RuleDef, salt: u64, is_action: bool, cfg: &EngineConfig) -> CompiledRule {
         let ctx = format!("{} '{}'", if is_action { "action" } else { "rule" }, r.name);
         let script = r.script.as_deref().map(|src| {
-            self.rhai.compile(src).unwrap_or_else(|e| {
+            let ast = self.rhai.compile(src).unwrap_or_else(|e| {
                 self.errors.push(format!("{ctx} script: {e}"));
                 AST::empty()
-            })
+            });
+            Ex { ast, native: crate::native::compile(src, &self.params, self.tick_rate), src: src.to_string() }
         });
         CompiledRule {
             checks: AtomicU64::new(0),
@@ -461,7 +633,7 @@ impl Compiler<'_> {
 /// Collected from machines: expressions, action blocks, rules written in states.
 #[derive(Default)]
 struct Machines {
-    exprs: Vec<AST>,
+    exprs: Vec<Ex>,
     expr_guards: Vec<Option<Vec<Term>>>,
     blocks: Vec<Vec<CDo>>,
     /// (machine, path within machine, rule)
@@ -614,7 +786,7 @@ fn do_sources<'a>(d: &'a Do, out: &mut Vec<&'a str>) {
         Do::Set(_, e) | Do::Add(_, e) | Do::Need(_, e) => out.push(e),
         Do::Move(dx, dy) => out.extend([dx.as_str(), dy.as_str()]),
         Do::Move3(dx, dy, dz) => out.extend([dx.as_str(), dy.as_str(), dz.as_str()]),
-        Do::MoveBy(dx, dy) => out.extend([dx.as_str(), dy.as_str()]),
+        Do::MoveBy(dx, dy) | Do::SpawnAt(_, dx, dy) => out.extend([dx.as_str(), dy.as_str()]),
         Do::SetField(_, e) | Do::AddField(_, e) => out.push(e),
         Do::SetFieldAt(_, dx, dy, dz, v) => out.extend([dx.as_str(), dy.as_str(), dz.as_str(), v.as_str()]),
         Do::On(_, ds) => ds.iter().for_each(|d| do_sources(d, out)),
@@ -755,6 +927,14 @@ fn entity_map(e: &Entity, dist: Option<i64>) -> Map {
     m
 }
 
+/// Files a game names besides its own: vehicle texts by name, the track's text, and what could not be found.
+#[derive(Clone, Debug, Default)]
+pub struct Data {
+    pub vehicles: BTreeMap<String, String>,
+    pub track: Option<String>,
+    pub missing: Vec<String>,
+}
+
 impl Game {
     /// `dir/game.ron` + `config` (default `dir/engine.toml`).
     pub fn load(dir: &Path, config: Option<&Path>) -> Result<(World, Game), String> {
@@ -776,7 +956,30 @@ impl Game {
             let path = found.ok_or_else(|| format!("environment '{name}': no envs/{name}.ron next to or above {}", dir.display()))?;
             envs.push((name.clone(), read(&path)?));
         }
-        Self::from_parts(&game_src, cfg_src, &envs)
+        let mut data = Data::default();
+        for name in def.kinds.values().filter_map(|k| k.vehicle.as_ref()) {
+            // vehicles/<name>.ron next to or above the game, else assets/vehicles/<name>.ron above it.
+            let file = format!("{name}.ron");
+            let found = dir
+                .ancestors()
+                .map(|a| a.join("vehicles").join(&file))
+                .chain(dir.ancestors().map(|a| a.join("assets").join("vehicles").join(&file)))
+                .find(|p| p.exists());
+            match found {
+                Some(path) => {
+                    data.vehicles.insert(name.clone(), read(&path)?);
+                }
+                None => data.missing.push(format!("vehicle '{name}': no vehicles/{file} or assets/vehicles/{file} near {}", dir.display())),
+            }
+        }
+        if let Some(t) = &def.track {
+            let path = dir.join(&t.file);
+            match std::fs::read_to_string(&path) {
+                Ok(text) => data.track = Some(text),
+                Err(e) => data.missing.push(format!("track: {}: {e}", path.display())),
+            }
+        }
+        Self::from_parts_with(&game_src, cfg_src, &envs, &data)
     }
 
     pub fn from_strs(game_ron: &str, engine_toml: &str) -> Result<(World, Game), String> {
@@ -785,6 +988,11 @@ impl Game {
 
     /// `envs`: (name, text of `envs/<name>.ron`) for every environment the game lists.
     pub fn from_parts(game_ron: &str, engine_toml: &str, envs: &[(String, String)]) -> Result<(World, Game), String> {
+        Self::from_parts_with(game_ron, engine_toml, envs, &Data::default())
+    }
+
+    /// Like `from_parts`, with the texts of the vehicle and track files the game names.
+    pub fn from_parts_with(game_ron: &str, engine_toml: &str, envs: &[(String, String)], data: &Data) -> Result<(World, Game), String> {
         let mut def: GameDef = ron::from_str(game_ron).map_err(|e| format!("game.ron: {e}"))?;
         let cfg: EngineConfig = toml::from_str(engine_toml).map_err(|e| format!("engine.toml: {e}"))?;
         let parsed: Vec<EnvDef> =
@@ -792,7 +1000,14 @@ impl Game {
         let merge_errors = def.merge_envs(&parsed).err().unwrap_or_default();
         let mut game = Self::compile(def, cfg);
         game.compile_errors.extend(merge_errors);
-        let texts: Vec<&str> = envs.iter().flat_map(|(_, s)| ["\0", s.as_str()]).collect();
+        game.read_vehicles(data);
+        let texts: Vec<&str> = envs
+            .iter()
+            .map(|(_, s)| s.as_str())
+            .chain(data.vehicles.values().map(String::as_str))
+            .chain(data.track.as_deref())
+            .flat_map(|s| ["\0", s])
+            .collect();
         game.source_hash = [game_ron, "\0", engine_toml]
             .into_iter()
             .chain(texts)
@@ -801,6 +1016,40 @@ impl Game {
         let (world, errs) = game.initial_world();
         game.compile_errors.extend(errs);
         Ok((world, game))
+    }
+
+    /// The cars and the track the game names, parsed and checked: every problem is a load error.
+    fn read_vehicles(&mut self, data: &Data) {
+        use sim_core::sim_physics::{Track, TrackDef, VehicleDef};
+        self.compile_errors.extend(data.missing.iter().cloned());
+        let kinds: Vec<(String, String)> = self.def.kinds.iter().filter_map(|(k, d)| d.vehicle.clone().map(|v| (k.clone(), v))).collect();
+        for (kind, name) in kinds {
+            let Some(text) = data.vehicles.get(&name) else {
+                if !data.missing.iter().any(|m| m.contains(&format!("'{name}'"))) {
+                    self.compile_errors.push(format!("kind '{kind}': vehicle '{name}' was not read"));
+                }
+                continue;
+            };
+            match ron::from_str::<VehicleDef>(text) {
+                Ok(v) => {
+                    let problems = v.problems();
+                    self.compile_errors.extend(problems.iter().map(|p| format!("vehicle '{name}': {p}")));
+                    if problems.is_empty() {
+                        self.vehicles.insert(kind, v);
+                    }
+                }
+                Err(e) => self.compile_errors.push(format!("vehicle '{name}': {e}")),
+            }
+        }
+        if let (Some(t), Some(text)) = (&self.def.track, &data.track) {
+            match ron::from_str::<TrackDef>(text) {
+                Ok(def) => match Track::new(&def) {
+                    Ok(_) => self.surface = Some(sim_core::Surface { track: def, origin: t.origin, grid: t.grid.clone() }),
+                    Err(problems) => self.compile_errors.extend(problems.iter().map(|p| format!("track {}: {p}", t.file))),
+                },
+                Err(e) => self.compile_errors.push(format!("track {}: {e}", t.file)),
+            }
+        }
     }
 
     fn compile(def: GameDef, cfg: EngineConfig) -> Game {
@@ -832,6 +1081,17 @@ impl Game {
         rhai.register_fn("toward_x", |kind: &str, sel: &str| CTX.with(|c| c.borrow().toward(kind, Some(sel), 0)));
         rhai.register_fn("toward_y", |kind: &str, sel: &str| CTX.with(|c| c.borrow().toward(kind, Some(sel), 1)));
         rhai.register_fn("near_in", |kind: &str, sel: &str| CTX.with(|c| c.borrow().near_in(kind, sel)));
+        rhai.register_fn("ahead", |kind: &str| CTX.with(|c| c.borrow().gap(kind, 0, 1)));
+        rhai.register_fn("ahead", |kind: &str, dx: i64| CTX.with(|c| c.borrow().gap(kind, dx, 1)));
+        rhai.register_fn("behind", |kind: &str| CTX.with(|c| c.borrow().gap(kind, 0, -1)));
+        rhai.register_fn("behind", |kind: &str, dx: i64| CTX.with(|c| c.borrow().gap(kind, dx, -1)));
+        rhai.register_fn("ahead_id", |kind: &str| CTX.with(|c| c.borrow().gap_id(kind, 0, 1)));
+        rhai.register_fn("ahead_id", |kind: &str, dx: i64| CTX.with(|c| c.borrow().gap_id(kind, dx, 1)));
+        rhai.register_fn("behind_id", |kind: &str| CTX.with(|c| c.borrow().gap_id(kind, 0, -1)));
+        rhai.register_fn("behind_id", |kind: &str, dx: i64| CTX.with(|c| c.borrow().gap_id(kind, dx, -1)));
+        rhai.register_fn("touching", |kind: &str| CTX.with(|c| c.borrow().touching(kind)));
+        rhai.register_fn("under", |kind: &str| CTX.with(|c| c.borrow().under(kind)));
+        rhai.register_fn("prop_of", |id: i64, prop: &str, default: i64| CTX.with(|c| c.borrow().prop_of(id, prop, default)));
         rhai.register_fn("field", |name: &str| -> Result<i64, Box<rhai::EvalAltResult>> {
             CTX.with(|c| c.borrow().field(name, 0, 0, 0)).map_err(Into::into)
         });
@@ -853,7 +1113,9 @@ impl Game {
         #[cfg(not(feature = "parallel"))]
         let pool: Option<Pool> = None;
 
-        let mut cc = Compiler { rhai: &rhai, errors: Vec::new() };
+        let mut native_params = def.params.clone();
+        native_params.extend(cfg.params.iter().map(|(k, v)| (k.clone(), *v)));
+        let mut cc = Compiler { rhai: &rhai, errors: Vec::new(), params: native_params, tick_rate: cfg.run.tick_rate };
         let mut mach = Machines::default();
         let specs: BTreeMap<String, Spec<usize, usize>> =
             def.fsms.iter().map(|(name, f)| (name.clone(), cc.spec(&mut mach, name, "", f, true))).collect();
@@ -875,9 +1137,9 @@ impl Game {
             .map(|e| CompiledEnd { when: cc.expr(&e.when, &format!("end '{}'", e.result)), result: e.result.clone() })
             .collect();
         let score = def.score.as_deref().map(|s| cc.expr(s, "score"));
-        let field_tops: Vec<(String, AST)> =
+        let field_tops: Vec<(String, Ex)> =
             def.fields.iter().filter_map(|(n, f)| Some((n.clone(), cc.expr(f.top.as_ref()?, &format!("field '{n}' top"))))).collect();
-        let senses: BTreeMap<String, Vec<(String, AST)>> = def
+        let senses: BTreeMap<String, Vec<(String, Ex)>> = def
             .kinds
             .iter()
             .filter(|(_, k)| !k.senses.is_empty())
@@ -890,7 +1152,7 @@ impl Game {
         for (kind, k) in &def.kinds {
             if let Some(b) = &k.brain {
                 let inputs =
-                    b.inputs.iter().map(|(n, src)| (n.clone(), cc.expr(src, &format!("kind '{kind}' brain input '{n}'")))).collect();
+                    b.inputs.iter().map(|(n, src)| (n.clone(), cc.expr(src, &format!("kind '{kind}' brain input '{n}'")).ast)).collect();
                 brain_inputs.insert(kind.clone(), inputs);
             }
         }
@@ -1005,6 +1267,8 @@ impl Game {
             expr_guards: mach.expr_guards,
             blocks: mach.blocks,
             initial_states,
+            vehicles: BTreeMap::new(),
+            surface: None,
         }
     }
 
@@ -1032,8 +1296,20 @@ impl Game {
         };
         let mut world = World::new3(self.cfg.run.seed, w, h, d);
         world.set_solid(self.def.kinds.iter().filter(|(_, k)| k.solid).map(|(n, _)| n.clone()).collect());
+        world.set_cling(self.def.kinds.iter().filter(|(_, k)| k.cling).map(|(n, _)| n.clone()).collect());
+        world.set_motion(self.def.kinds.iter().filter_map(|(n, k)| k.motion.map(|m| (n.clone(), m))).collect());
+        world.set_vehicles(self.vehicles.clone(), self.surface.clone(), self.cfg.run.tick_rate);
         for (name, f) in &self.def.fields {
             world.add_field(name, f.init);
+            if let Some(from) = f.from_level {
+                for z in 0..from.clamp(0, d) {
+                    for y in 0..h {
+                        for x in 0..w {
+                            world.set_field(name, x, y, z, 0);
+                        }
+                    }
+                }
+            }
         }
         world.set_terrain(self.def.terrain.clone());
 
@@ -1086,10 +1362,12 @@ impl Game {
             let Some(def) = self.def.kinds.get(kind) else {
                 continue; // validate reports it
             };
-            if def.solid {
-                let placed = self.place_solid(&mut world, kind, *n);
+            if def.solid || def.cling || def.motion.is_some() {
+                let placed = self.place_shuffled(&mut world, kind, *n);
                 if placed < *n {
-                    errs.push(format!("engine.toml [spawn]: {kind} = {n}, but only {placed} free cells"));
+                    let room = if def.cling { "voxels against terrain" } else { "free cells" };
+                    let room = if def.motion.is_some() { "cells free of other moving things" } else { room };
+                    errs.push(format!("engine.toml [spawn]: {kind} = {n}, but only {placed} {room}"));
                 }
                 continue;
             }
@@ -1113,7 +1391,8 @@ impl Game {
         (world, errs)
     }
 
-    fn place_solid(&self, world: &mut World, kind: &str, n: u32) -> u32 {
+    /// Solid and clinging kinds: one by one into shuffled voxels where they can stand.
+    fn place_shuffled(&self, world: &mut World, kind: &str, n: u32) -> u32 {
         let mut cells: Vec<i64> = (0..world.width * world.height * world.depth).collect();
         let salt = splitmix64(kind.bytes().fold(world.seed, |h, b| splitmix64(h ^ b as u64)));
         for i in (1..cells.len()).rev() {
@@ -1127,7 +1406,10 @@ impl Game {
             }
             let (state, props) = self.template(kind);
             let (x, y, z) = (cell % world.width, (cell / world.width) % world.height, cell / (world.width * world.height));
-            if world.spawn3(kind, &state, x, y, z, props).is_some() {
+            // A moving thing never starts inside another: one per cell among moving kinds.
+            let taken = world.motion(kind).is_some()
+                && world.at3(x, y, z).iter().any(|id| world.get(*id).is_some_and(|e| world.motion(&e.kind).is_some()));
+            if !taken && world.can_enter(kind, x, y, z) && world.spawn3(kind, &state, x, y, z, props).is_some() {
                 placed += 1;
             }
         }
@@ -1419,8 +1701,26 @@ impl Game {
             let len = full.len();
             self.push_entity(full, world, e);
             self.bind(e, SENSE_SALT);
+            let _n = nscope(Some(self.nenv(e, None, Some(world.tick as i64))));
             for (name, ast) in senses {
                 bump(&self.work.evals);
+                let native = ast.native.as_ref().and_then(|n| {
+                    self.native(|env| {
+                        n.run_val(env).map(|v| match v {
+                            crate::native::Val::I(i) => Dynamic::from(i),
+                            crate::native::Val::B(b) => Dynamic::from(b),
+                        })
+                    })
+                });
+                if let Some(v) = native {
+                    if native_check() {
+                        CTX.with(|c| c.borrow_mut().calls = 0);
+                        let r = self.rhai.eval_ast_with_scope::<Dynamic>(full, ast).map(|d| format!("{d:?}")).map_err(|e| e.to_string());
+                        assert_eq!(r, Ok(format!("{v:?}")), "native check: sense `{}`", ast.src);
+                    }
+                    out.insert(name.as_str().into(), v);
+                    continue;
+                }
                 match self.rhai.eval_ast_with_scope::<Dynamic>(full, ast) {
                     Ok(v) => {
                         out.insert(name.as_str().into(), v);
@@ -1451,7 +1751,10 @@ impl Game {
         let values = b
             .inputs
             .iter()
-            .map(|(n, ast)| self.eval_int(&mut scope, ast).map_err(|m| format!("input '{n}': {m}")))
+            .map(|(n, ast)| {
+                bump(&self.work.evals);
+                self.eval_int_ast(&mut scope, ast).map_err(|m| format!("input '{n}': {m}"))
+            })
             .collect::<Result<Vec<i64>, String>>()?;
         let fresh;
         let genome = if e.genome.len() == b.genes {
@@ -1540,13 +1843,38 @@ impl Game {
                         let r = rules.iter().fold(Sees::default(), |a, r| a.or(r.sees));
                         r.or(if chart { machines } else { Sees::default() }).or(Sees::of(&format!("{def:?}")))
                     };
-                    let plan =
-                        Plan { idle: plain && !chart && rules.is_empty(), guarded: plain && rules.iter().all(|r| r.guard.is_some()), sees };
+                    let bare = !sees.near
+                        && !native
+                        && !self.brains.contains_key(k)
+                        && std::env::var_os("SIMCRAFT_NO_BARE").is_none()
+                        && self.all_compiled(k, &rules);
+                    let plan = Plan {
+                        idle: plain && !chart && rules.is_empty(),
+                        guarded: plain && rules.iter().all(|r| r.guard.is_some()),
+                        sees,
+                        bare,
+                    };
                     (k.clone(), plan)
                 })
                 .collect()
         });
         plans.get(kind).copied().unwrap_or(Plan::FULL)
+    }
+
+    /// Is everything a kind evaluates compiled: its senses, its machine's conditions and actions, and its rules'
+    /// conditions, actions and scripts?
+    fn all_compiled(&self, kind: &str, rules: &[&CompiledRule]) -> bool {
+        let ex_ok = |x: &Ex| x.native.is_some();
+        let do_ok = |d: &CDo| {
+            let mut v = Vec::new();
+            d.int_exprs(&mut v);
+            v.into_iter().all(ex_ok)
+        };
+        let senses = self.senses.get(kind).into_iter().flatten().all(|(_, x)| ex_ok(x));
+        let machine = !self.kind_charts.contains_key(kind) || (self.exprs.iter().all(ex_ok) && self.blocks.iter().flatten().all(do_ok));
+        let rules_ok =
+            rules.iter().all(|r| r.when.as_ref().is_none_or(ex_ok) && r.then.iter().all(do_ok) && r.script.as_ref().is_none_or(ex_ok));
+        senses && machine && rules_ok
     }
 
     /// A guarded kind produces nothing here if its machine (checked natively) stays put and every rule's guard is
@@ -1573,15 +1901,24 @@ impl Game {
         if plan.idle || (plan.guarded && self.all_guards_false(e)) {
             return Vec::new();
         }
+        if plan.bare
+            && let Some(env) = self.bare_env(world, e)
+        {
+            let _n = nscope(Some(env));
+            let scope = if self.agent_view(&e.kind) { &mut scopes.agent } else { &mut scopes.full };
+            return self.eval_entity_in(world, e, scope);
+        }
         if !self.agent_view(&e.kind) {
             let scope = &mut scopes.full;
             let len = scope.len();
             self.push_seen(scope, world, e, plan.sees);
+            let _n = nscope(Some(self.nenv(e, None, Some(world.tick as i64))));
             let out = self.eval_entity_in(world, e, scope);
             scope.rewind(len);
             return out;
         }
         let (sense, errs) = self.sense_map(&mut scopes.full, world, e);
+        let _n = nscope(Some(self.nenv(e, Some(&sense), None)));
         let scope = &mut scopes.agent;
         let len = scope.len();
         self.push_seen(scope, world, e, plan.sees);
@@ -1698,7 +2035,9 @@ impl Game {
             return Ok(());
         }
         let len = scope.len();
-        scope.push_constant("roll", world.roll(who.me.id, salt));
+        let roll = world.roll(who.me.id, salt);
+        let _roll = nset(|n| n.roll = Some(roll));
+        scope.push_constant("roll", roll);
         self.bind(who.me, salt);
         let mut res = Ok(());
         'blocks: for &b in blocks {
@@ -1753,14 +2092,126 @@ impl Game {
         Ok(())
     }
 
-    fn eval_bool(&self, scope: &mut Scope, ast: &AST) -> Result<bool, String> {
+    fn eval_bool(&self, scope: &mut Scope, ex: &Ex) -> Result<bool, String> {
         bump(&self.work.evals);
-        self.rhai.eval_ast_with_scope::<bool>(scope, ast).map_err(|e| e.to_string())
+        let before = CTX.with(|c| c.borrow().calls);
+        if let Some(v) = ex.native.as_ref().and_then(|n| self.native(|env| n.bool(env))) {
+            if native_check() {
+                CTX.with(|c| c.borrow_mut().calls = before);
+                let len = scope.len();
+                self.dress(scope);
+                let r = self.rhai.eval_ast_with_scope::<bool>(scope, ex).map_err(|e| e.to_string());
+                scope.rewind(len);
+                assert_eq!(r, Ok(v), "native check: `{}`", ex.src);
+            }
+            return Ok(v);
+        }
+        let len = scope.len();
+        self.dress(scope);
+        let r = self.rhai.eval_ast_with_scope::<bool>(scope, ex).map_err(|e| e.to_string());
+        scope.rewind(len);
+        r
     }
 
-    fn eval_int(&self, scope: &mut Scope, ast: &AST) -> Result<i64, String> {
+    fn eval_int(&self, scope: &mut Scope, ex: &Ex) -> Result<i64, String> {
         bump(&self.work.evals);
-        self.rhai.eval_ast_with_scope::<i64>(scope, ast).map_err(|e| e.to_string())
+        let before = CTX.with(|c| c.borrow().calls);
+        if let Some(v) = ex.native.as_ref().and_then(|n| self.native(|env| n.int(env))) {
+            if native_check() {
+                CTX.with(|c| c.borrow_mut().calls = before);
+                assert_eq!(self.eval_int_ast(scope, ex), Ok(v), "native check: `{}`", ex.src);
+            }
+            return Ok(v);
+        }
+        self.eval_int_ast(scope, ex)
+    }
+
+    fn eval_int_ast(&self, scope: &mut Scope, ast: &AST) -> Result<i64, String> {
+        let len = scope.len();
+        self.dress(scope);
+        let r = self.rhai.eval_ast_with_scope::<i64>(scope, ast).map_err(|e| e.to_string());
+        scope.rewind(len);
+        r
+    }
+
+    /// A bare kind's scope has no `me`, `sense` or `it`: before the interpreter answers for it, they are made from
+    /// the native shadow (the caller rewinds after). Nothing happens for kinds with a full scope.
+    fn dress(&self, scope: &mut Scope) {
+        NENV.with(|n| {
+            let b = n.borrow();
+            let Some(env) = b.as_ref().filter(|e| e.bare) else { return };
+            bump(&self.work.maps);
+            // SAFETY: the shadow's pointers live as long as the evaluation (see `NEnv`).
+            scope.push_constant("me", entity_map(unsafe { env.me.as_ref() }, None));
+            let sense: Map = env
+                .sense
+                .iter()
+                .map(|(k, v)| {
+                    let d = match v {
+                        crate::native::Val::I(i) => Dynamic::from(*i),
+                        crate::native::Val::B(b) => Dynamic::from(*b),
+                    };
+                    (k.as_str().into(), d)
+                })
+                .collect();
+            scope.push_constant("sense", sense);
+            if let Some((it, d)) = env.it {
+                scope.push_constant("it", entity_map(unsafe { it.as_ref() }, Some(d)));
+            }
+        });
+    }
+
+    /// A compiled expression's value, if the fast paths are on, this thread has a native shadow of the scope, and
+    /// the expression gets through without a surprise. On a `Fallback` the hidden `rand` counter is put back, so
+    /// the interpreter that answers instead sees exactly the calls it would have seen.
+    fn native<T>(&self, f: impl FnOnce(&NEnv) -> Result<T, crate::native::Fallback>) -> Option<T> {
+        if !self.fast.load(Ordering::Relaxed) {
+            return None;
+        }
+        NENV.with(|n| {
+            let b = n.borrow();
+            let env = b.as_ref()?;
+            let calls = CTX.with(|c| c.borrow().calls);
+            match f(env) {
+                Ok(v) => Some(v),
+                Err(_) => {
+                    CTX.with(|c| c.borrow_mut().calls = calls);
+                    None
+                }
+            }
+        })
+    }
+
+    /// A bare kind's native shadow, its senses computed natively; None if one of them falls back (then the entity
+    /// takes the full path this tick).
+    fn bare_env(&self, world: &World, e: &Entity) -> Option<NEnv> {
+        let tick = (!self.agent_view(&e.kind)).then_some(world.tick as i64);
+        let mut env = self.nenv(e, None, tick);
+        env.bare = true;
+        if let Some(senses) = self.senses.get(&e.kind) {
+            let probe = NEnv { tick: Some(world.tick as i64), ..env.clone() };
+            let _n = nscope(Some(probe));
+            self.bind(e, SENSE_SALT);
+            for (name, x) in senses {
+                bump(&self.work.evals);
+                let v = x.native.as_ref().and_then(|n| self.native(|env| n.run_val(env)))?;
+                env.sense.push((name.clone(), v));
+            }
+        }
+        Some(env)
+    }
+
+    /// The native shadow of an entity's scope: `me`, its senses (numbers and booleans), and `tick` if it sees it.
+    fn nenv(&self, e: &Entity, sense: Option<&Map>, tick: Option<i64>) -> NEnv {
+        let sense = sense
+            .into_iter()
+            .flatten()
+            .filter_map(|(k, v)| {
+                let v = if let Ok(i) = v.as_int() { crate::native::Val::I(i) } else { crate::native::Val::B(v.as_bool().ok()?) };
+                Some((k.to_string(), v))
+            })
+            .collect();
+        NEnv { me: NonNull::from(e), it: None, sense, roll: None, tick, tick_rate: self.cfg.run.tick_rate, bare: false }
     }
 
     /// No copy: per-rule variables are pushed, then the scope is rewound.
@@ -1778,16 +2229,23 @@ impl Game {
         if native == Some(false) {
             return Ok(None);
         }
-        scope.push_constant("roll", world.roll(e.id, rule.salt));
+        let roll = world.roll(e.id, rule.salt);
+        scope.push_constant("roll", roll);
+        let _roll = nset(|n| n.roll = Some(roll));
         self.bind(e, rule.salt);
 
+        let mut _it = None;
         let it = match &rule.target {
             None => None,
             Some(t @ (Target::Nearest(_) | Target::NearestIn(..))) => {
                 bump(&self.work.queries);
                 let Some((t, d)) = nearest(world, e, t) else { return Ok(None) };
-                bump(&self.work.maps);
-                scope.push_constant("it", entity_map(t, Some(d)));
+                let bare = NENV.with(|n| n.borrow().as_ref().is_some_and(|e| e.bare));
+                if !bare {
+                    bump(&self.work.maps);
+                    scope.push_constant("it", entity_map(t, Some(d)));
+                }
+                _it = Some(nset(|n| n.it = Some((NonNull::from(t), d))));
                 Some(t)
             }
             Some(t) => return Err(format!("target must be Nearest(kind) or NearestIn(kind, state), got {t:?}")),
@@ -1810,9 +2268,39 @@ impl Game {
 
         if let Some(script) = &rule.script {
             bump(&self.work.evals);
-            let out: Array = self.rhai.eval_ast_with_scope(scope, script).map_err(|e| e.to_string())?;
-            for item in out {
-                effects.push(effect_from_map(e, item)?);
+            let before = CTX.with(|c| c.borrow().calls);
+            if let Some(list) = script.native.as_ref().and_then(|n| self.native(|env| n.effects(env))) {
+                if native_check() {
+                    CTX.with(|c| c.borrow_mut().calls = before);
+                    let len = scope.len();
+                    self.dress(scope);
+                    let out = self.rhai.eval_ast_with_scope::<Array>(scope, script).map_err(|e| e.to_string());
+                    scope.rewind(len);
+                    let out = out?;
+                    let rhai: Vec<Effect> = out.into_iter().map(|i| effect_from_map(e, i)).collect::<Result<_, _>>()?;
+                    let mine: Vec<Effect> = list
+                        .iter()
+                        .map(|(add, prop, v)| {
+                            if *add {
+                                Effect::Add { e: e.id, prop: prop.clone(), d: *v }
+                            } else {
+                                Effect::Set { e: e.id, prop: prop.clone(), v: *v }
+                            }
+                        })
+                        .collect();
+                    assert_eq!(format!("{rhai:?}"), format!("{mine:?}"), "native check: script `{}`", script.src);
+                }
+                for (add, prop, v) in list {
+                    effects.push(if add { Effect::Add { e: e.id, prop, d: v } } else { Effect::Set { e: e.id, prop, v } });
+                }
+            } else {
+                let len = scope.len();
+                self.dress(scope);
+                let out = self.rhai.eval_ast_with_scope::<Array>(scope, script).map_err(|e| e.to_string());
+                scope.rewind(len);
+                for item in out? {
+                    effects.push(effect_from_map(e, item)?);
+                }
             }
         }
 
@@ -1860,6 +2348,15 @@ impl Game {
                 });
                 out.push(Effect::Spawn { kind: k.clone(), state, x: subj.x, y: subj.y, z: subj.z, props, genome });
             }
+            CDo::SpawnAt(k, dx, dy) => {
+                let (state, props) = self.template(k);
+                let (dx, dy) = (self.eval_int(scope, dx)?, self.eval_int(scope, dy)?);
+                // Outside the world: nothing (a spawn is clamped into the world by the core otherwise).
+                if !world.in_bounds3(subj.x + dx, subj.y + dy, subj.z) {
+                    return Ok(false);
+                }
+                out.push(Effect::Spawn { kind: k.clone(), state, x: subj.x + dx, y: subj.y + dy, z: subj.z, props, genome: Vec::new() });
+            }
             CDo::MoveToward(k) => {
                 if let Some((t, _)) = world.nearest(subj, k) {
                     out.push(Effect::Move { e: subj.id, dx: t.x - subj.x, dy: t.y - subj.y, dz: t.z - subj.z });
@@ -1901,9 +2398,9 @@ impl Game {
                 let d = self.eval_int(scope, ast)?;
                 out.push(Effect::FieldAdd { name: name.clone(), x: subj.x, y: subj.y, z: subj.z, d });
             }
+            // Exactly there (a reach): the game guards how far, e.g. `when: "abs(arg.dx) <= p.reach"`.
             CDo::SetFieldAt(name, dx, dy, dz, v) => {
-                let (dx, dy, dz) =
-                    (self.eval_int(scope, dx)?.signum(), self.eval_int(scope, dy)?.signum(), self.eval_int(scope, dz)?.signum());
+                let (dx, dy, dz) = (self.eval_int(scope, dx)?, self.eval_int(scope, dy)?, self.eval_int(scope, dz)?);
                 let v = self.eval_int(scope, v)?;
                 out.push(Effect::FieldSet { name: name.clone(), x: subj.x + dx, y: subj.y + dy, z: subj.z + dz, v });
             }
@@ -1975,7 +2472,7 @@ impl Game {
             Do::Despawn(t) => {
                 self.target_kinds(name, target, me, t, errs);
             }
-            Do::Spawn(k) | Do::MoveToward(k) | Do::MoveAway(k) if !self.def.kinds.contains_key(k) => {
+            Do::Spawn(k) | Do::SpawnAt(k, _, _) | Do::MoveToward(k) | Do::MoveAway(k) if !self.def.kinds.contains_key(k) => {
                 errs.push(format!("'{name}': unknown kind '{k}'"));
             }
             Do::Climb(k, prop) => match self.def.kinds.get(k) {
@@ -2030,6 +2527,27 @@ impl Game {
 
     fn check_refs(&self, errs: &mut Vec<String>) {
         let known = |k: &str| self.def.kinds.contains_key(k);
+        for (name, k) in self.def.kinds.iter().filter(|(_, k)| k.motion.is_some()) {
+            if k.solid || k.cling {
+                errs.push(format!("kind '{name}' has `motion`: it moves by velocity, so it cannot be `solid` or `cling`"));
+            }
+            for p in sim_core::MOTION_PROPS.iter().filter(|p| k.props.contains_key(**p)) {
+                errs.push(format!("kind '{name}' declares prop '{p}': the engine owns it on a moving kind (set it in a rule)"));
+            }
+            if k.vehicle.is_some() {
+                for p in sim_core::VEHICLE_PROPS.iter().filter(|p| k.props.contains_key(**p)) {
+                    errs.push(format!("kind '{name}' declares prop '{p}': the engine owns it on a vehicle (read it)"));
+                }
+            }
+            if let Some(m) = k.motion
+                && (m.size.0 <= 0 || m.size.1 <= 0)
+            {
+                errs.push(format!("kind '{name}' motion: size must be positive (fine units, {} a cell)", sim_core::FINE));
+            }
+        }
+        for (name, _) in self.def.kinds.iter().filter(|(_, k)| k.vehicle.is_some() && k.motion.is_none()) {
+            errs.push(format!("kind '{name}' has `vehicle` but no `motion`: a vehicle moves continuously (add motion: (size: ..))"));
+        }
         for k in self.cfg.spawn.keys().filter(|k| !known(k)) {
             errs.push(format!("engine.toml [spawn]: unknown kind '{k}'"));
         }
@@ -2070,6 +2588,11 @@ impl Game {
             && !self.def.fields.contains_key(t)
         {
             errs.push(format!("terrain '{t}' is not a declared field"));
+        }
+        if self.def.terrain.is_none()
+            && let Some((k, _)) = self.def.kinds.iter().find(|(_, k)| k.cling)
+        {
+            errs.push(format!("kind '{k}' clings, but the world has no `terrain` to cling to"));
         }
         if let Some(l) = &self.def.layout {
             for (ch, values) in &l.cells {
@@ -2187,7 +2710,15 @@ impl Game {
         let counts = self.counts(world);
         let bound = self.bind_world(world);
         let synthetic = |kind: &str| {
-            let (state, props) = self.template(kind);
+            let (state, mut props) = self.template(kind);
+            if self.def.kinds.get(kind).is_some_and(|k| k.motion.is_some()) {
+                props.extend(sim_core::MOTION_PROPS.iter().map(|p| ((*p).to_string(), 0)));
+            }
+            if self.def.kinds.get(kind).is_some_and(|k| k.vehicle.is_some()) {
+                for p in sim_core::VEHICLE_PROPS.iter().chain(&sim_core::VEHICLE_INPUTS) {
+                    props.entry((*p).to_string()).or_insert(0);
+                }
+            }
             Entity { id: 0, kind: kind.into(), state, x: 0, y: 0, z: 0, props, genome: Vec::new() }
         };
         for kind in self.def.kinds.keys() {
@@ -2328,7 +2859,8 @@ impl Rules for Game {
             self.eval_entity(world, e, scope)
         };
         // In a small world, distributing work costs more than the work: sequential path.
-        let pool = self.pool.as_ref().filter(|_| entities.len() >= 4 * CHUNK);
+        let active = entities.iter().filter(|e| !self.plan(&e.kind).idle).count();
+        let pool = self.pool.as_ref().filter(|_| active >= PARALLEL_FROM);
         let groups: Vec<Vec<Group>> = match pool {
             #[cfg(feature = "parallel")]
             Some(pool) => pool.install(|| entities.par_iter().with_min_len(CHUNK).map_init(init, per).collect()),
@@ -2343,6 +2875,8 @@ impl Rules for Game {
     /// Fields: diffuse through the 6 face neighbours, then pin level 0 to each `top` expression.
     /// Integers, voxel order, native: deterministic and fast.
     fn physics(&self, world: &mut World) {
+        // Crawlers left over nothing (their floor dug away) fall until they touch terrain.
+        world.settle_clingers();
         let mut tops = Vec::new();
         if self.def.fields.values().any(|f| f.top.is_some()) {
             let mut scope = self.world_scope(world);
@@ -2352,36 +2886,58 @@ impl Rules for Game {
                 }
             }
         }
-        for (name, f) in self.def.fields.iter().filter(|(_, f)| f.diffusion > 0) {
+        // Diffusion then decay, in one pass per field. Each voxel's new value reads only the old field, so levels are
+        // computed side by side on the game's cores (large worlds) and the result is the same at any core count.
+        for (name, f) in self.def.fields.iter().filter(|(_, f)| f.diffusion > 0 || f.decay > 0) {
             let Some(old) = world.field_values(name) else { continue };
-            let (w, h, d) = (world.width, world.height, world.depth);
-            let at = |x: i64, y: i64, z: i64| old[((z * h + y) * w + x) as usize];
-            let mut new = old.to_vec();
-            for z in 0..d {
+            let (w, h, d) = (world.width as usize, world.height as usize, world.depth as usize);
+            let (diffusion, keep) = (f.diffusion, 100 - f.decay);
+            let plane = w * h;
+            let level = |z: usize, out: &mut [i64]| {
                 for y in 0..h {
                     for x in 0..w {
-                        let here = at(x, y, z);
-                        let (mut sum, mut k) = (0, 0);
-                        for (dx, dy, dz) in [(-1, 0, 0), (1, 0, 0), (0, -1, 0), (0, 1, 0), (0, 0, -1), (0, 0, 1)] {
-                            let (nx, ny, nz) = (x + dx, y + dy, z + dz);
-                            if (0..w).contains(&nx) && (0..h).contains(&ny) && (0..d).contains(&nz) {
-                                sum += at(nx, ny, nz);
+                        let i = z * plane + y * w + x;
+                        let here = old[i];
+                        let mut v = here;
+                        if diffusion > 0 {
+                            let (mut sum, mut k) = (0i64, 0i64);
+                            let mut add = |j: usize| {
+                                sum += old[j];
                                 k += 1;
+                            };
+                            if x > 0 {
+                                add(i - 1);
+                            }
+                            if x + 1 < w {
+                                add(i + 1);
+                            }
+                            if y > 0 {
+                                add(i - w);
+                            }
+                            if y + 1 < h {
+                                add(i + w);
+                            }
+                            if z > 0 {
+                                add(i - plane);
+                            }
+                            if z + 1 < d {
+                                add(i + plane);
+                            }
+                            if k > 0 {
+                                v = here + (sum - k * here) * diffusion / (100 * k);
                             }
                         }
-                        if k > 0 {
-                            new[((z * h + y) * w + x) as usize] = here + (sum - k * here) * f.diffusion / (100 * k);
-                        }
+                        out[y * w + x] = if f.decay > 0 { v * keep / 100 } else { v };
                     }
                 }
+            };
+            let mut new = vec![0i64; old.len()];
+            match self.pool.as_ref().filter(|_| old.len() >= 16_384) {
+                #[cfg(feature = "parallel")]
+                Some(pool) => pool.install(|| new.par_chunks_mut(plane).enumerate().for_each(|(z, out)| level(z, out))),
+                _ => new.chunks_mut(plane).enumerate().for_each(|(z, out)| level(z, out)),
             }
             world.replace_field(name, new);
-        }
-        for (name, f) in self.def.fields.iter().filter(|(_, f)| f.decay > 0) {
-            if let Some(old) = world.field_values(name) {
-                let new = old.iter().map(|v| v * (100 - f.decay) / 100).collect();
-                world.replace_field(name, new);
-            }
         }
         // Boundary last: level 0 holds its pinned value at the end of every tick.
         for (name, v) in tops {
@@ -2452,7 +3008,9 @@ impl Oracle<usize> for RhaiOracle<'_, '_, '_> {
             return Ok(v);
         }
         let len = self.scope.len();
-        self.scope.push_constant("roll", self.world.roll(self.e.id, FSM_SALT + salt));
+        let roll = self.world.roll(self.e.id, FSM_SALT + salt);
+        let _roll = nset(|n| n.roll = Some(roll));
+        self.scope.push_constant("roll", roll);
         self.game.bind(self.e, FSM_SALT + salt);
         let r = self.game.eval_bool(self.scope, &self.game.exprs[*g]);
         self.scope.rewind(len);
@@ -2460,7 +3018,9 @@ impl Oracle<usize> for RhaiOracle<'_, '_, '_> {
     }
     fn score(&mut self, g: &usize, salt: u64) -> Result<i64, String> {
         let len = self.scope.len();
-        self.scope.push_constant("roll", self.world.roll(self.e.id, FSM_SALT + salt));
+        let roll = self.world.roll(self.e.id, FSM_SALT + salt);
+        let _roll = nset(|n| n.roll = Some(roll));
+        self.scope.push_constant("roll", roll);
         self.game.bind(self.e, FSM_SALT + salt);
         let r = self.game.eval_int(self.scope, &self.game.exprs[*g]);
         self.scope.rewind(len);
@@ -2528,11 +3088,7 @@ fn climb_field(world: &World, e: &Entity, name: &str, salt: u64) -> Option<(i64,
 
 /// One step towards the highest `value` among the neighbours a mover could enter; shuffled start breaks ties.
 fn uphill(world: &World, e: &Entity, salt: u64, here: i64, value: impl Fn(i64, i64, i64) -> Option<i64>) -> Option<(i64, i64, i64)> {
-    let cells: Vec<(i64, i64, i64)> = if world.is_solid(&e.kind) {
-        world.free_neighbors(e.x, e.y, e.z)
-    } else {
-        world.neighbors(e.x, e.y, e.z).into_iter().filter(|&(x, y, z)| !world.is_terrain(x, y, z)).collect()
-    };
+    let cells = world.enterable_neighbors(&e.kind, e.x, e.y, e.z);
     if cells.is_empty() {
         return None;
     }
@@ -2551,6 +3107,12 @@ fn uphill(world: &World, e: &Entity, salt: u64, here: i64, value: impl Fn(i64, i
 
 fn wander(world: &World, e: &Entity, salt: u64) -> Effect {
     let r = world.rand(e.id, salt ^ 0x5741_4E44);
+    // A crawler picks among the voxels it can stand in (most random steps would leave the surface).
+    if world.clings(&e.kind) {
+        let cells = world.enterable_neighbors(&e.kind, e.x, e.y, e.z);
+        let (dx, dy, dz) = cells.get((r % cells.len().max(1) as u64) as usize).map_or((0, 0, 0), |c| (c.0 - e.x, c.1 - e.y, c.2 - e.z));
+        return Effect::Move { e: e.id, dx, dy, dz };
+    }
     // In 3D the same draw also picks a level step; at depth 1 dx and dy are exactly as before.
     let dz = if world.depth > 1 { ((r / 9) % 3) as i64 - 1 } else { 0 };
     Effect::Move { e: e.id, dx: (r % 3) as i64 - 1, dy: ((r / 3) % 3) as i64 - 1, dz }

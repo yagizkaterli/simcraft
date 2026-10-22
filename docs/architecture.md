@@ -46,11 +46,13 @@ engine.toml┴─► sim-rules ──────►├── sim-ffi    (C API)
 | Crate | Contents | Knows the game? |
 |---|---|---|
 | `sim-core` | `World` (entities + cell grid + per-kind index, mutation only via methods), `Effect`, `Group`, `apply`, `Engine<Loaded→Validated→Running>`, `trait Rules`, hash, snapshot/restore | No |
+| `sim-physics` | The physics layer, blind to games and the world: plain data in, a fixed step, plain data out. `rigid`: 3D rigid bodies (`f32` for now, see Rigid bodies). `fixed`: `Fx` (Q48.16 fixed point, `i128` intermediates, exact integer `sqrt`), `Angle` (binary angle, 2^32 a turn, sin/cos from a compile-time integer table), `curve` (piecewise-linear data, e.g. a torque curve). `verlet`: points and constraints (ropes, chains, struts; see Constraints). Plan: `docs/plans/physics-and-vehicles.md` | No |
+| `sim-mobile` | The mobile core (see Mobile core): the iOS/Android shell (winit + wgpu), gestures, screen layers, haptics; a static library for Xcode and a shared library for Gradle | No |
 | `sim-state` | State charts: nested states, layers, reusable machines, remember, interrupt/back, pick; memory encoding; selectors; step distances. Guards and actions are generic (`G`, `A`) | No (not even Rhai) |
 | `sim-rules` | `GameDef` (RON), `EngineConfig` (TOML), Rhai compilation, dry-run validation, `impl Rules for Game` | Knows the schema, not the content |
 | `sim-agent` | The `simcraft-agent` binary, JSON line protocol, ASCII map | No |
 | `sim-ffi` | `cdylib` + `staticlib`, C header; the agent protocol behind `extern "C"` | No |
-| `sim-gpu` | HD renderer (`wgpu` 29 + `winit` 0.30): a game's side-view `stage.ron` (2.5D quads) or first-person `track.ron` (3D: perspective camera, depth, fog), composed without a GPU (`stage`, `track`, tested) and drawn by `gpu`; camera effects driven by game events (`fx`); `simcraft-play` (window, `--shot`, `--record`, `--bench`), `simcraft-import` | No |
+| `sim-gpu` | HD renderer (`wgpu` 29 + `winit` 0.30): a game's side-view `stage.ron` (2.5D quads), first-person `track.ron` (3D: perspective camera, depth, fog) or the driver's seat `drive.ron` (a cockpit on a TrackDef), composed without a GPU (`stage`, `track`, `drive`, tested) and drawn by `gpu`; camera effects driven by game events (`fx`); `simcraft-play` (window, `--shot`, `--record`, `--bench`), `simcraft-import` | No |
 | `sim-kernel` (`kernel/`) | 32-bit integer tensor machine that runs ONNX graphs (brains, rules as graphs); `Graph` builds models in code; `genome`/`mutate` for learning | No |
 | `sim-render` | Terminal renderer (cell buffer, diff, frame loop), primitives, 3D voxel view, `view.ron`; `simcraft-view` | No |
 
@@ -68,7 +70,11 @@ tick:
 - **Rules never mutate the world.** They produce a `Group`: the effects of one rule firing.
 - **Groups are atomic.** If an entity the group touches already died earlier this tick, the whole group is dropped. If that entity is someone else, a `conflict` event is emitted (two wolves cannot eat the same sheep); if it is the group's own actor, the group is dropped silently. Likewise, if any `Need` in the group no longer holds against the live state, the group is dropped with a `short` event.
 - An entity **moves at most once per tick**. The first `Move` wins.
-- Evaluation (read-only) runs on `[run] threads` cores (0 = all); results merge in entity-id order, so the core count never changes the outcome. `apply` is single-threaded.
+- Evaluation (read-only) runs on `[run] threads` cores (0 = all) once 48 entities have something to evaluate (idle kinds do not count), in jobs of at least 16; results merge in entity-id order, so the core count never changes the outcome. `apply` is single-threaded. Field physics (diffusion and decay, one fused pass) runs level by level on the same cores in large worlds: each voxel reads only the old field, so the result is the same at any core count.
+- The world's hash covers every entity and every field voxel. By default it is computed every tick (replays and tests
+  compare every tick); a host that does not read it turns it off (`Engine::hash_every_tick(false)`: the agent
+  protocol hashes once per `step`, a game window never) and asks `world().hash()` when it needs one. With bus
+  subscribers every tick is hashed anyway; fields are hashed a value at a time (not byte-wise FNV), since they are most of a 3D world's state.
 - FSM transitions are applied in `apply`. Rules see the old state for the rest of that tick.
 - **Solid kinds** occupy their cell: at most one solid per cell. A solid cannot move into, or spawn onto, a cell holding another solid (a blocked spawn emits `blocked`).
 
@@ -110,6 +116,13 @@ Everything that happens is published once, in order, on `Engine::bus()`: `start`
 | `On(Me \| It \| Nearest(kind), [...])` | Applies the nested actions to that entity instead of the owner |
 | `Need(prop, min)` | Guard: `prop >= min` on the subject. Checked at request/eval time and again at apply time against the live state; if it fails the whole group is dropped (`short`). Prevents double spending under simultaneous moves |
 
+**Compiled rules** (`sim_rules::native`): at load, every expression and script is also parsed into a native form
+when it is in the common subset (integer arithmetic, comparisons, `&& || !`, `if`, blocks with `let`, `me.* it.*
+sense.* p.*`, `roll`, `tick`, the engine functions, and script lists of `set`/`add` effect maps). Those run without
+the interpreter; anything else, and anything unexpected at run time (overflow, a missing prop), is answered by Rhai.
+Same order of evaluation and calls (so `rand` sees the same dice); `fast_paths_change_nothing` compares every game
+both ways, `SIMCRAFT_NATIVE_CHECK=1` checks every compiled answer against the interpreter.
+
 **B. Rhai script (escape hatch):** the `script:` field returns an array of effect maps:
 `#{op: "set"|"add", prop, value}`, `#{op: "emit", name}`, `#{op: "move", dx, dy}`, `#{op: "despawn"}`.
 
@@ -131,7 +144,7 @@ Everything that happens is published once, in order, on `Engine::bus()`: `start`
 
 **Seats (panel):** `[agent] seats = {alice = 1, bob = 2}` makes the game multi-player. Requests carry `"as": "<seat>"`; an entity belongs to a seat when its `owner` prop equals the seat's number, and controllable kinds must declare `owner`.
 
-**Kinds** in `game.ron`: `glyph`, `props`, optional `fsm`, `solid: bool`, `hidden: bool` (not drawn), `glyphs: {state: char}` for per-state rendering (the deepest matching state wins), and `senses: {name: expr}` (see Perception).
+**Kinds** in `game.ron`: `glyph`, `props`, optional `fsm`, `solid: bool`, `hidden: bool` (not drawn), `glyphs: {state: char}` for per-state rendering (the deepest matching state wins), and `senses: {name: expr}` (see Perception), `cling: bool` (a crawler: it only enters voxels touching `terrain`, so it walks floors, walls and ceilings and never floats; `Wander` and `Climb` choose among those voxels, `[spawn]` places it on surfaces, and if its support is dug away it falls until it touches terrain again).
 
 ## State machines (`fsms:`)
 
@@ -234,6 +247,8 @@ A world has `width × height × depth` voxels; 2D games have depth 1 and behave 
   (`rows:` alone is one level). `cells` sets field values at a glyph's voxels without placing an entity.
 - **Fields** are numbers per voxel, owned by the world (hashed, snapshotted, replayed):
   `fields: { "temp": (init: 50, diffusion: 20, top: "env.seasons.warmth"), "soil": (init: 0) }`.
+  - `from_level: n`: `init` only from level `n` down (deeper); above it the field starts at 0. Ground under air
+    without a layout: `"mud": (init: 1, from_level: 14)`.
   - `diffusion`: % of the difference to the average of the 6 face neighbours moved per tick (integers; heat spreads
     through soil). `top`: a world-level expression pinned onto level 0 after diffusion, every tick (the air above
     the ground holds its value at the end of each tick).
@@ -245,9 +260,161 @@ A world has `width × height × depth` voxels; 2D games have depth 1 and behave 
     and takes the first open one. (Only worlds with terrain slide; 2D games have none.)
 - **Rule language:** `me.z`, `it.z`; `Move3(dx, dy, dz)`; `MoveToward` / `MoveAway` / `Wander` / `Climb` work in 3D;
   `field("temp")` (at me) and `field_at("temp", dx, dy, dz)` in expressions; actions `SetField(name, expr)`,
-  `AddField(name, expr)` at the subject's voxel, `SetFieldAt(name, dx, dy, dz, expr)` at a voxel next to it (dig);
+  `AddField(name, expr)` at the subject's voxel, `SetFieldAt(name, dx, dy, dz, expr)` exactly at that offset (dig, drop: a
+  reach; the game guards how far, e.g. `when: "abs(arg.dx) <= p.reach"`);
   `ClimbField(name)` steps to the open neighbour with the most `name`.
 - `around` and `near` count and measure in 3D.
+
+## Continuous motion (`motion:` on a kind)
+
+Cells are fine for herds and colonies; an action game needs things that glide, brake and drift. A kind with
+`motion` moves continuously: a position finer than a cell and a velocity, integrated by the engine every tick
+(Fiedler's fixed step; the renderer draws between ticks, so nothing teleports). Research and the alternatives
+weighed: `docs/research/continuous-time.md`. Kinds without `motion` are untouched (same hashes).
+
+```ron
+"car": (glyph: 'c', motion: (size: (620, 1700))),              // footprint: across, along (fine units)
+"surfer": (glyph: 'S', motion: (size: (300, 500), gravity: 9)), // falls: height loses 9 fine units/tick² of speed
+```
+
+- **Units.** `FINE = 1000` fine units to a cell. Integer throughout (deterministic, no floats).
+- **Engine-owned props** of a moving kind (created at spawn, readable and writable like any prop):
+  `px`, `py` (its centre, absolute, fine units; starts at its cell's centre), `vx`, `vy` (fine units per tick),
+  `ph`, `vh` (height above the ground and its speed: a jump), `mount` (the id of the entity it rides, 0 = none).
+  The cell (`x`, `y`) follows: `x = px / FINE` (floored), so every cell-based query still works.
+- **Integration**, after `apply`, before fields: every free mover `px += vx`, `py += vy`; in the air
+  (`ph > 0` or `vh > 0`) `vh -= gravity`, `ph += vh`, and the ground (0) stops it (`ph = 0`, `vh = 0`). A
+  **mounted** entity is carried: it moves by its mount's displacement this tick plus its own velocity, and cannot
+  sink below its mount's `top` prop (a roof); if its mount is gone it moves freely. Riders are integrated after
+  the free movers, so a rider sees where its mount got to.
+- **Flows** (hybrid automata, research §8): a state's motion is its velocity; write it with state rules
+  (`Set("vx", ...)` while `Changing`). Discrete moves (`Move`, `MoveBy`) shift `px`/`py` by whole cells.
+- **Footprint queries** (fine units; boxes of `size` about `px`, `py`; "ahead" is the way the entity faces, the
+  sign of its `vy`, +y when standing):
+
+| Function | Returns |
+|---|---|
+| `ahead(kind)` / `ahead(kind, dx)` | Gap from my front to the back of the nearest `kind` ahead whose extent across overlaps mine (shifted `dx` across: the next lane), `FAR` (999999) if none |
+| `behind(kind)` / `behind(kind, dx)` | The same, behind me |
+| `touching(kind)` | How many `kind` footprints overlap mine |
+| `under(kind)` | The id of the `kind` whose footprint holds my centre (0 if none) |
+| `prop_of(id, prop, default)` | A prop of that entity |
+
+- **`SpawnAt(kind, dx, dy)`** spawns `kind` at my cell offset by (`dx`, `dy`) cells (expressions): traffic
+  made ahead of and behind a player instead of a whole road laid out at the start.
+- **Broadphase:** footprint queries use a sweep-and-prune index (per kind and column, sorted along the road), built
+  after each tick's motion; any change drops it and queries scan until it is rebuilt. Same answers either way
+  (`the_broadphase_answers_exactly_what_a_scan_answers`). `ahead_id(kind [, dx])` / `behind_id` give who is there.
+  At the start, moving kinds from `[spawn]` take one cell each.
+- **Checked:** a moving kind cannot be `solid` or `cling` (it moves by velocity, not by steps), and its game
+  cannot declare the engine-owned props itself.
+
+## Constraints (`sim_physics::verlet`)
+
+Physics comes in tiers, and a game uses the cheapest that gives its feel (`docs/research/mobile-types.md`): grid
+kinematics (tier 0), **constraints** (tier 1, here), rigid bodies (tier 2, growing from `contact`).
+
+- **Points:** position and previous position in `Fx` (velocity is their difference: Verlet), and an inverse weight
+  (`0` = pinned: nothing moves it). Gravity and a damping factor per step.
+- **Constraints** between two points with a rest length: `Distance` (a rod: pushes and pulls), `Max` (a rope: it
+  can go slack, it can't stretch), `Min` (a strut: it can't get shorter). A correction is split by inverse weight,
+  so a heavy load barely moves and a pinned point never does.
+- **Solving:** a fixed number of relaxation passes a step, constraints in their stored order, integer square
+  root: the same input gives the same points on every platform. Stretch left after the passes is kept; letting go
+  turns it into speed (the slingshot).
+- **Queries:** a rope's segments (for drawing and for swipe-across), its length and its tension (the largest
+  stretch left, for sound and haptics).
+
+## Rigid bodies (`sim_physics::rigid`)
+
+Tier 2 of the physics tiers: boxes, prisms and spheres that stack, rest, topple and get hit (stack-and-topple
+games). Research and parameter sources: `docs/research/smash-physics.md`.
+
+- **Floats, for now** (decided 2026-10-02): `f32` while a game's feel is tuned (the same binary gives the same
+  result); it moves to `fixed` once the feel is locked. The one place in `sim-physics` that is not integer.
+- **Shapes:** `Box { half }`, `Sphere { radius }`, `Prism { radius, half_height, sides }`: an upright convex prism
+  stands in for a cylinder (a can, a jar), as every casual game does.
+- **A step:** sweep-and-prune broadphase over bounds grown by how far a body can move; narrowphase by SAT on hulls
+  (Gregorius: face axes, Gauss-map-pruned edge axes, a bias towards faces) with face clipping to ≤ 4 points,
+  sphere–hull and sphere–sphere; all contacts speculative, so a fast projectile cannot pass through, and a
+  speculative contact on a fast sphere is kept only if its sweep this step really reaches the other body (no ghost
+  collisions: a stone flying past a corner is not stopped by a contact the linear model made up). Then the soft
+  step (Catto, Box2D v3) in `substeps` (6): integrate velocities, warm start, solve soft contacts (60 Hz, damping
+  ratio 10), integrate positions, relax, and a restitution pass. Warm starting matches points by anchor proximity.
+- **Sleeping:** union-find islands; an island whose bodies have all been slow for 0.5 s sleeps. A body made
+  `asleep` (a level's tower) stays bit-identical until something awake touches it; waking floods to every sleeping
+  body it touches.
+- **Collision layers:** `layer` and `mask` per body; two bodies touch only if each one's layer is in the other's
+  mask (debris that hits the ground but not the tower).
+- **Out:** `impacts()` (per touching pair: point, normal, impulse, approach speed, new) for breaking, haptics and
+  camera; `stats()` (awake, manifolds, points, deepest overlap and the pair's tags); `raycast`; `sphere_cast`
+  (conservative advancement, layer-aware: what a thrown sphere first touches, exactly). `World` is `Clone` (a
+  game's bot tries shots on copies).
+- **Measured:** property tests (parabola, rest without sinking, an asleep tower bit-identical, stacks, pyramids,
+  cans, no tunnelling at 40 m/s, a hit wakes and topples, same inputs same result) and named scenes
+  (`rigid::scenes`: `stack10`, `pyramid21`, `cans5`, `wall40`, `shot`) with `measure`.
+
+## Vehicles (`vehicle:` on a kind, `track:` in the game)
+
+A moving kind with `vehicle: "stock_car"` is a car, and the physics layer (`sim-physics`) drives it every tick,
+straight after the rules (tick step 3, before other motion). Cars are data: `vehicles/<name>.ron` next to or above
+the game, else `assets/vehicles/<name>.ron` (`VehicleDef`: mass, geometry, torque curve as dyno points, gears,
+brakes, tyres, aero, sub-steps; a missing number with a rule of thumb derives itself). Vehicle worlds use 1 m cells,
+so fine units are millimetres.
+
+```ron
+kinds: { "car": (motion: (size: (1996, 4912)), vehicle: "stock_car", props: { ... }) },
+track: (file: "tracks/charlotte.ron", origin: (680000, 60000), grid: (spacing: 9000, columns: 2, gap: 5000)),
+```
+
+- **Intent (props the car reads; rules, actions or the autopilot write them):**
+  - `throttle` and `brake`, 0..1000;
+  - `steer`, -1000 (right) to 1000 (left);
+  - `reverse` 1 engages reverse (through first gear's ratio);
+  - `shift` +1 or -1 asks for a gear up or down when `manual` is 1 (otherwise the gearbox shifts itself);
+  - `aids` 1 turns on traction control and ABS (the autopilot always drives with them);
+  - `pilot` 1 hands the car to the engine's autopilot, which drives `line` mm left of the centreline at `pace` ‰
+    of its planned limit; `pilot` 2 is line steering for a player: the autopilot steers to `line` (the player moves
+    it), catches slides, and caps the player's pedals at what the car can hold (brake assist): target control,
+    the arcade mode; `pilot` 3 is assisted steering: the same steering, the pedals the player's alone;
+  - `grid` N puts the car in grid slot N on its first tick.
+- **State (props the engine writes; a game may read them, never declare them):**
+  - `px`, `py`, and `vx`, `vy` in mm per tick;
+  - `yaw`, 65536 a turn, counterclockwise from +x;
+  - `speed` (mm/s), `g_long` and `g_lat` (mm/s², what the driver feels);
+  - `rpm` and `gear`;
+  - `track_s` and `track_off` (mm along the track and left of its centreline);
+  - the full-precision physics state in hidden props (`_x`, `_vx`, `_yaw`, ...), so hashes, snapshots and replays
+    cover cars without anything new.
+- **The model (`sim-physics`, `docs/plans/physics-and-vehicles.md`):**
+  - a dynamic bicycle: slip-angle tyres, linear to the limit then sliding, a friction circle shared with drive
+    and brakes;
+  - load transfer, downforce and banking;
+  - a drivetrain: the torque curve at the rpm the gear gives, a slipping clutch pulling away, a limiter, engine
+    braking, and a sequential gearbox (automatic at the optimal shift points, or manual) with a torque cut per
+    shift;
+  - the kinematic bicycle at walking pace;
+  - 8 sub-steps a tick;
+  - aids: traction control and ABS.
+- **Tracks (`TrackDef`):**
+  - straights and left/right arcs with banking, eased across joins;
+  - `Track::pose(s, offset)` and `locate(x, y)` answer where things are;
+  - the track must close on itself.
+- **Autopilot:**
+  - a quasi-steady-state lap plan per (kind, line);
+  - pure pursuit steering and feed-forward pedals, with the aids on.
+- **Measured:**
+  - oracle tests against textbook vehicle dynamics (`sim-physics`);
+  - `simcraft-physics-bench` scenes, including `lap`, a stock car on the Charlotte-sized oval against the real
+    pole (`games/race/LAPS.md`).
+- **Contact (`sim-physics::contact`, once a tick after the step):**
+  - cars are oriented boxes, from the kind's `motion` size, tested with the separating axis test;
+  - walls come from the track's `left`/`right` sides (`width`, `grip` of the run-off, `wall`);
+  - the response is sequential impulses with restitution and friction;
+  - `impact` (N·s) is the output.
+- **Autopilot racecraft:** it passes a car ahead on the side with room, follows at a speed-dependent gap when it
+  cannot, turns at full lock when facing away from the line, and backs up when stalled.
+- **Not yet:** suspension (layer 4).
 
 ## Renderer (`sim-render`)
 
@@ -403,6 +570,7 @@ One JSON request per line, one JSON response per line. On startup it prints `{"o
 | `{"cmd":"info"[,"as":SEAT]}` | Game, kinds (glyph, props, states), controllable kinds, `seats`, `you` (your entity ids), declared `actions`, `score`, effective switches/params, command schema |
 | `{"cmd":"observe"[,"as":SEAT]}` | Full map (ASCII), `you`, `scores`, counts, states, entities |
 | `{"cmd":"observe","entity":ID}` | `observe_radius` window, `@` = you, visible entities |
+| `{"cmd":"field","name":F}` | `tick`, `width`, `height`, `depth`, `values`: the field at every voxel, in voxel order (x fastest, then y, then z). What evals measure structures with (a mound, a trail) |
 | `{"cmd":"act"[,"as":SEAT],"actions":[{"entity":ID,"do":"<action>","args":{...}}]}` | Evaluated now, applied on the next `step` before rules. Per-action `results` with `ok` or the reason (`refused: needs …`, `unknown action`, `takes args`, `switched off`, `not controllable`, `not yours`) |
 | `{"cmd":"step","n":N}` | tick, done, result (from `end`), `scores`, hash, counts, states (`{kind: {state: n}}`), events (game events plus `conflict`, `short`, `blocked`, `error: …`) |
 | `{"cmd":"hash"}` | State fingerprint (replay/verification) |
@@ -621,6 +789,85 @@ Stage(
   0.02 ms, GPU 2–2.6 ms per frame (with a full CPU wait per frame, so an upper bound); up to 244 quads; textures
   43 MB with mips (11 MB if block-compressed).
 
+## First person in a voxel world (`games/<name>/roam.ron`, `sim-gpu`)
+
+You are one entity of the game (game 9, `games/mound`): WASD walks, the mouse looks (click captures it, esc lets it
+go), shift runs, space jumps, walking into a wall climbs it, left click drops, right click digs, a held key shows an
+invisible field (the pheromone).
+
+- **Who owns what.** The body moves continuously in the view (`sim_gpu::walker`: velocity eases toward what the keys
+  ask, the view eases after the mouse, the eye glides after the body, gravity, collision with terrain voxels,
+  climbing). The game follows it one voxel a tick through a declared action (`crawl(dx, dy, dz)`); digging and
+  dropping are declared actions on the voxel the crosshair ray meets (`dig`/`drop(dx, dy, dz)`, relative to your
+  entity), checked by the game like any agent's, so the game stays the one truth: deterministic, replayable.
+- **`roam.ron`:** `you` (kind), `actions` (crawl, dig, drop, `reach`, the `carrying` prop), `materials` (terrain value
+  → image, texture scale, tint), `sky`, `fog`, `far`, `kinds` (crawler bodies: colours, size, the state or prop that
+  shows a ball in the mandibles), `smell` (field, colour, full strength, radius), `feel` (`WalkFeel`: eye height,
+  body size, walk/run speeds, `accel`/`air` ease rates, climb, jump, gravity, mouse sensitivity, `look_smooth`,
+  bob, fov and run fov, lean, landing dip, `eye_glide`), `keys`.
+- **Drawing:** terrain as `surface: Blocks` (faces open to air, per-corner ambient occlusion) or `surface: Smooth`
+  (surface nets through the same voxels: flat ground exactly on the voxel faces, edges and corners rounded by
+  relaxation, smooth normals, ambient occlusion from a prefix sum of open samples; beside the world, the untouched
+  ground continues up to its first height, so a pit at the edge has an outer wall); crawlers stand on the drawn
+  surface (its vertex and normal nearest their voxel's face: they tilt over rounded edges); `lens: (aperture, haze,
+  shadow)`: a macro lens (depth of field from a golden-angle disk blur by each pixel's distance, autofocus on what
+  the crosshair looks at, a placed camera on its target), sun shadows (a 2048² map over 22 voxels around where you
+  look; terrain and models cast and receive), and haze brighter towards the sun; crawlers from segments and six stepping legs, oriented on the face they cling to; your mandibles
+  and the ball you hold in view; the targeted face glows (red after a refusal); distance fog; the painted sky turns
+  with the view; the ground goes on beyond the world's edge.
+- **Cost:** the terrain is kept on the GPU (`Gpu::keep`) and uploaded only when it changes; fog is computed on the
+  GPU from the distance to the eye; bodies behind you or lost in the fog are not built, far ones are coarse and
+  legless; bodies, the terrain mesher and the colour conversion run on all cores. `simcraft-play <game> --bench N`
+  reports where a frame goes and the worst frame after warm-up.
+- **Frame drops, found and rebuilt** (`sim_gpu::perf`). Every frame records its phases (ticks, body, terrain
+  rebuild, frame build, draw and present, the window's own work) and exact counts (ticks run, vertices, bodies,
+  whether the terrain was rebuilt). In the window, a frame over `--budget` (ms, default 20) writes a spike report to
+  `runs/spikes/`: the tick, the world's hash, the camera, the phases, and the log of every action since the start;
+  the percentiles and the spikes print when the window closes.
+  - `--repro FILE`: the same game, panel and seed, the log replayed tick by tick, the hash checked (a different
+    state is refused, not profiled); the frame rendered again cold, warm, and with the terrain rebuilt on a warm
+    GPU; the ticks before it timed again.
+  - `--sweep N`: the scripted player for N frames, twice, headless. A spike on the same frame with the same hash in
+    both runs is the game's or the engine's (reports written); one seen once came from outside (OS, driver).
+  - `--stress N`: each load the view has, pushed through four levels, N frames each: every drawn kind (×1, ×4, ×8,
+    ×16 its spawn count), the terrain (10–100% of columns built), the shown field (5–100% of the air). The table
+    gives tick and frame percentiles, vertices and the worst phase, and where p95 first breaks the budget.
+- **Measured:** `simcraft-play <game> --feel` runs the real controller through a scripted walk, turn, hop and climb
+  and prints the feel metrics (`games/<name>/FEEL.md`); `--shot` after `--ticks` stands you facing the tallest
+  thing built (`--camera wide`: from above). `simcraft-check` checks the view against the game (your kind is
+  controllable, the three actions take `dx`, `dy`, `dz`, drawn kinds, the smell field, the carried prop).
+
+## Models: from modelling tools to the game (`sim_gpu::model`, `sim_gpu::skin`)
+
+A kind can be drawn with a model made in the best tools and bound to the game's own state machine. The format
+between tools is glTF 2.0 (`.glb`): Blender, Unity, Unreal and Higgsfield's image-to-3D generators all write it.
+Research and choices: `docs/research/animation.md`.
+
+- **Pipeline (the termite):** a reference image (Higgsfield) → a textured PBR mesh (Higgsfield image-to-3D: Tripo,
+  Meshy) → rigged and animated headless in Blender (`tools/blender/rig_insect.py`: anatomy read from the geometry,
+  bones with the contract's names, a `carry` socket, clips `walk`/`carry`/`dig`/`idle`, weights by distance to the
+  bones, three levels of detail) → `assets/models/*.glb`. Higgsfield rigs humanoids only; insects are rigged by us.
+  `tools/blender/inspect.py` renders any `.glb` from three sides and its clips frame by frame.
+- **Import:** `Model::load` reads meshes, PBR materials (base colour, normal, metal-roughness, occlusion), skins,
+  node hierarchy and clips (translation, rotation, scale; linear, step, cubic), and samples every clip once at
+  30 fps into palettes (a matrix per node and per skin joint). Conventions are glTF's: +Y up, +Z forward, feet at
+  y = 0.
+- **Drawing crowds:** each model is uploaded once (mesh, mipmapped textures, all palettes in one storage buffer);
+  each character is one 96-byte instance (transform, two frames and their blend, tint). The vertex shader skins;
+  the fragment shader lights with the PBR maps (normal maps from screen-space derivatives, GGX specular, sky and
+  ground ambient, wrap lighting and a transmitted back-light for thin bodies). One instanced draw per model part.
+  Needs storage buffers (Metal, Vulkan, DX12); without them (WebGL2) models are skipped.
+- **The contract** (`roam.ron`, per kind):
+  `model: (file, lods: [(from_distance, file)], length, clips: [(state_selector, clip)], still, rate, carry, textures)`.
+  The game's state picks the clip (first match; `*` = any), `still` plays when it has not moved for half a second,
+  every entity has its own clock, the `carry` socket holds a carried ball (`carries_in`: a state or a prop),
+  `textures` re-skins a material with an image from the asset packs (e.g. a Higgsfield texture).
+- **Checked:** `simcraft-check` refuses a clip state the kind's machine does not have, a clip or socket a file (at any
+  level of detail) does not have, a material to re-skin that does not exist. `simcraft-model FILE --game G --kind K`
+  prints what the engine sees, warns about convention mistakes (forward axis, feet, units) and writes the contract.
+- **Measured** (`--stress`, 1280x720): 960 model termites (12k/3k/800 triangles at 0–4/4–10/10+ voxels), p95
+  9.6 ms, worst 11.7 ms, 2.9M vertices a frame; the distances were chosen by probing 7/18, 4/10 and 3/7.
+
 ## First person: tracks (`games/<name>/track.ron`, `sim-gpu`)
 
 A game whose world is lanes (x) and a road ahead (y) can be played from inside: the camera rides with the followed
@@ -669,8 +916,9 @@ Track(
 - **Record** as for stages (`--shot out.png --record N --press KEY@FRAME`, `--view N`); effects of warm-up ticks are
   dropped before the first frame.
 - **Replay**: every accepted press is kept as (tick, action, args); the simulation is deterministic, so the presses
-  from the same start are the run. A finished run is saved to `runs/<game>-<unix time>.jsonl`; in the window `R`
-  watches the last run again (a red dot pulses), `N` starts a new one; `--replay FILE` plays a saved run in a window
+  from the same start are the run. A finished run is saved to `runs/<game>-<unix time>.jsonl`. In the window `R`
+  or `N` (or any game key once the run is over) starts a new run; `V` watches the run just ended again (red edges
+  and a pulsing dot on screen; any game key leaves it). Nothing replays unless asked (`TrackPlay::intent`, tested); `--replay FILE` plays a saved run in a window
   or into `--shot` / `--record` (a video of a real run). A replay ignores the player's keys.
 - **Gone things** (`kinds.X.gone`): when an entity of that kind vanishes near the camera (smashed, picked up), it
   keeps playing an animation where it was: `x` (sideways, away from the followed entity), `y`, `rot`, `scale`,
@@ -678,6 +926,146 @@ Track(
 - **Meters animate**: a new icon pops in, a lost one bursts off (grows, spins, fades) while the rest shake.
   `blink: "Wobbly"` blinks the followed entity's body while it is in that state (invulnerable after a hit). The
   `hurt` effect channel reds the edges of the screen.
+- **Moving kinds** (`motion`) are drawn from their fine positions between ticks (`Tween::place`): they glide at
+  their velocity. A moving followed entity is drawn where the simulation has it, across and in height (its arcs
+  are physics); `switch` then only plays its effects.
+- **Feel, measured** (`--feel --replay RUN`): the run replayed headless at 60 frames a second through this code;
+  `stall` (frames a moving thing near the camera did not move), `step_ratio` (largest step over average step),
+  `eye_jerk`, `rider_jerk`, tick and frame cost (`sim_gpu::track::feel_probe`, `games/highway_surfers/FEEL.md`).
+- **Themes** (`themes: [(name, assets, sky, skyline, road, fog, kinds, rider, scenery, music)]`): the same game in
+  another world; a theme names only what it changes (`Track::themed`). `t` switches in the window, `--theme NAME`
+  picks one for shots and feel runs; every theme's packs load at the start and every picture is checked then.
+  **Music** (`music`: an MP3 next to the game or under `assets/`) loops with `rodio`; `m` mutes; no sound device, no
+  error. A kind can be a **picture over an invisible block** (`block: (.., invisible: true)`: the rider stands on the
+  block, the player sees the picture), facing the way it drives (`oncoming` frames when its `vy` is below 0), drawn
+  `face` in front of its middle. The rider can be a picture too (`rider.image`).
+- **Road**: `median: (lane, width, height, color)` makes one lane a barrier between two directions (solid lines both
+  sides); blocks can be `wedge` (a ramp) and `pulse` (a glow).
+- **Swipes** (`swipes: { "left": [(action, args), ...], ..., "tap": [...] }`): eight directions and a tap, each a
+  list of moves tried in order (the first the game takes is made, as a key tries its buttons). A mouse drag is the
+  same code as a finger (`sim_gpu::track::swipe_dir`). Buttons can be `hidden` (keys only) and have a `release`
+  action (hold to crouch, hold to walk).
+- **From outside** (`rider`, third person; `highway_surfers`): the followed entity drawn as a stack of greybox
+  `parts`, standing on the top of whatever `block` is under it (drawn positions, between ticks). In an `air` state
+  (selector → apex) it flies an arc from where it took off to what is under it, lasting as long as its `timer` prop
+  counts down, so it lands on the tick the game does; when the ground drops away it falls with `gravity`. `poses`
+  scale it by state (a crouch), fx channels `squash` and `tilt` act on it, and in its `ground` states it stands on
+  the road whatever is in its cell: the picture follows the rules. Blocks between it and the camera fade to ghosts.
+- **Blocks** (`kinds.X.block: (size, color, lift, surface)`): a kind drawn as a shaded box instead of a picture
+  (greybox before assets); its top is a surface unless `surface: false` (a bridge deck). `lift_by: (prop, k)` raises
+  a standing picture by a prop (a coin at height `h`).
+- **Chase camera**: `follow_height` (how much of the rider's height the eye rises with, on the `rise` spring), `lag`
+  (the eye trails the rider across on a spring), `follow_x` (how much of the move across it follows: the road stays
+  framed from an outside lane), `speed_fov` (degrees per unit a second), `speed_streaks` (speed lines from this speed).
+- **Hitstop** (`hitstop: { event: (secs, scale, recover) }`): the world runs at `scale` for `secs`, then eases back;
+  the camera's effects keep playing. **Screen**: `screen: (w, h)` shapes the window and shots (portrait for a phone);
+  `--size` overrides it. Arrow keys are `left right up down`.
+
+## Driving from the seat (`games/<name>/drive.ron`, `sim_gpu::drive`)
+
+A game whose cars are free-moving kinds on a TrackDef (`games/race`) is played from the driver's seat. The view only
+reads: cars' `px`, `py` (mm) and `yaw` (65536 a turn), and, when they exist, props named in `props` (`speed`, `rpm`,
+`gear`, `steer`, `throttle`, `brake`, `g_long`/`g_lat` as felt, `pitch`/`roll`, `lap`, lap times, `position`,
+`number`, `impact`). What a car does not report the view derives (speed and g from motion, body roll and pitch from g,
+laps and the running order from progress round the track) or leaves out. `simcraft-play` picks it when the game has a
+`drive.ron`.
+
+```ron
+Drive(
+    cars: "car", you: ("human", 1),                     // the kind; which one is yours
+    props: (last_lap_ms: "lap_ms", best_lap_ms: "best_ms"),
+    cockpit: (fov: 50.0, wheel: (lock: 190.0), shift_lights: (7800.0, 9200.0)),   // eye, head, body, mirror...
+    controls: (action: "drive",
+               axes: { "throttle": (key: "up", rise_ms: 180.0, fall_ms: 120.0),
+                       "steer": (neg: "right", pos: "left", speed_sensitive: (60.0, 0.1)) },
+               buttons: [ (key: "a", action: "shift", args: { "dir": 1 }), (key: "backspace", action: "reverse", toggle: "on") ]),
+    autopilot: (action: "autopilot", arg: "on"),       // O and --auto hand your car to the game's own driver
+    look: (sun: (205.0, 24.0), pit_road: (-300.0, 240.0), stands: [...]),
+)
+```
+
+- **The track** is the game's (`track:` in game.ron, file and origin); `drive.ron` may name one only for a game
+  that has none. Built once from `Track::pose` (`drive::scene`) and kept on the GPU: banked asphalt with paving seams
+  and a darker groove (low in the turns, high on the straights), a flatter apron with white and double yellow lines,
+  the start/finish line and pit stalls as strips of the grid (never decals that flicker), the SAFER barrier on a
+  concrete wall, the catch fence leaning in, pit road behind its wall, grandstands with a crowd and a suite tower,
+  a mowed infield, haulers, land and a tree line in the haze. Every picture is generated (`drive::geom`); cars sit on
+  the surface there (height and tilt from `locate` and the ground's slope, so on the apron too).
+- **Photographs** (`look.textures`, `drive::photos`): a surface → `(file, size)` map (PNG or JPEG, next to the game or
+  in an `assets/` folder above it). Surfaces: `asphalt`, `apron`, `pit`, `grass` (tiled, `size` m a tile), `groove`
+  (the rubbered line: the asphalt's own triangles drawn again with the photo, streaked along the track, fading
+  across the line; the same vertices give the same depths, so it cannot z-fight), `safer`, `concrete`, `crowd`,
+  `suites`, `trees` (strips seamless along the wall or the ring, `size` their height, the length from the picture's
+  proportions), `sky` (a panorama as 32 cylinder slices round the eye, each quad the azimuths it covers, so it stays
+  put and tilts with the horizon; `size` degrees of horizon a copy, mirrored between copies), `dash` and `wheel`
+  (the cockpit's panel with the display and shift lights placed in its screen, `cockpit.display`/`lights`; the
+  wheel turning with the steer), `banner` (on a gantry over the track at `banner_at`), `sponsors` (`boards`: one
+  every N m on the catch fence, each the next of the picture's panels), `logo` (on the infield grass at `logos`).
+  A surface without a photo, or whose file is missing, keeps the generated picture; painted lines are plain paint
+  over either. Surfaces are sampled with 8× anisotropic filtering.
+- **Cars as a model** (`look.model: (file, forward, height)`, `look.liveries`, `drive::carmodel`): a glTF fitted once
+  into the car's frame (its nose axis named, scaled to the kind's `motion` footprint and the height given; the
+  right-handed file mirrored into the left-handed render space, winding kept) and drawn as one instance per car
+  (`skin::Instance`), in the frame and in the mirror. The livery is a per-instance tint: `tint.w` 2 paints the
+  model's white (bright, unsaturated texels) with the first colour and its rockers and two stripes (model frame)
+  with the second (`params`); glass, tyres and grilles keep theirs. Numbers are block-digit decals on a plate on
+  both doors and the roof (found on the fitted body), drawn within 150 m. Your car is hidden in the cockpit (the
+  hood through the glass takes its livery). No model, a missing file or a GPU without storage buffers: box cars.
+- **The cockpit camera** (`C`: chase): a fixed field of view (no zoom with speed); the head a spring-damper leaning
+  against the felt g by millimetres (a Cup seat holds it), nodding under braking, jolted by `impact`; the horizon
+  tilting with the banking, `level` of it taken back by the neck on a spring (the vestibular reflex); buzz growing
+  with the square of speed and bumps fixed to places on the track; the eyes a few degrees into the turn from the yaw
+  rate. Geometry around it: dash, dot-matrix display (gear, speed, rpm, position) with shift lights, switch panel,
+  a wheel turning `steer × lock` with gloved hands, roll cage, A-pillars and the centre post, window net, windshield
+  with its sun strip, and a rear-view mirror: the driver's eye mirrored in its glass renders the scene into a texture
+  every frame (`Gpu::render_into`, drawn before the frame that shows it).
+- **Tab** rides on board the next car (`--watch ID` for shots and feel runs); your keys keep driving yours.
+- **HUD**: position, gaps ahead and behind (seconds), lap, current, last and best lap; spotter calls (car low, car
+  high, three wide, still there, clear) from who overlaps you along the track.
+- **Controls** (analog, keyboard now): each arg of `action` is an axis; held keys ramp it over `rise_ms`, release
+  over `fall_ms`, `speed_sensitive: (at, keep)` leaves `keep` of it from `at` m/s. The values go through the declared
+  action once a tick when they change, like any press, so they land in the run log (`runs/`, `--replay`). Buttons are
+  actions with fixed args or a `toggle` arg. The ramp takes a target in -1..1 per axis, so a gamepad or a wheel will
+  set the target directly.
+- **Sound** (`sound:`, the host, never the simulation; `drive::audio` decides, `drive::mixer` plays through `rodio`;
+  `M` mutes). A mixer with named buses (`buses`: engine, others, effects, voice, music) and a master `volume`;
+  recordings are looked for in `dirs` (WAV, FLAC, Ogg Vorbis, MP3) and any subset works:
+  - *your engine*: RPM-crossfaded loops (granular engine audio): each of `loops` is tagged with the rpm it was
+    recorded at and its load (`On`, `Off`, `Both`), played pitched by rpm / recorded rpm; the two loops nearest the
+    rpm crossfade at equal power, the throttle blends on-load into off-load at equal power; a loop whose file is
+    missing is played by the synthesiser with its share (harmonics of the four-stroke cycle, the firing order
+    strongest, a V8's half order, a rasp at the firing rate), so with no recordings it is the synthesised note.
+    `sweep: (file, from, to, bands, length)`: one steady recording from idle to redline, taken as linear in rpm
+    over its length, cut into `bands` loops of `length` s around the moment each band's middle rpm was reached,
+    each made seamless (its tail crossfaded into its head) and levelled to the same loudness;
+  - *the field*: every other car's engine (the same loops or the synthesiser) with distance attenuation (full within
+    `others.reference` m, falling by `rolloff`, silent past `max`), equal-power stereo pan by its bearing, and
+    Doppler from the closing speeds; `passby` (a recording) is started so its loudest moment lands at the car's
+    predicted closest approach;
+  - *effects* (a recording by role, `files`, else synthesised): tyre `squeal` from the tyres' slip (`_slip`), a
+    `scrape` while contact holds, an `impact` on a new hit (`impact` N·s), a `shift` clunk on a gear change, `wind`
+    with the square of speed, the `crowd` louder near the grandstands;
+  - *the spotter* (`voice: (dir, lines, gap, repeat, stale)`): the HUD's call (car low/high, three wide, still
+    there, clear low/high) says the first line found of its list; one line at a time, a gap after each, no repeat
+    within `repeat` s, a call that went stale waiting dropped; the green flag when the field rolls, the checkered
+    at the end, a wreck ahead (hooks for a white flag: a line named `white_flag`);
+  - *music*: `music_menu` on the grid before the green (`countdown` s in the window) and while paused,
+    `music_results` after the checkered, none while racing; faded, and ducked under your engine (`duck`).
+  `simcraft-check` lists every recording found and what plays in place of each missing one.
+- **Measured** (`simcraft-play <game> --feel [--record N]`, `drive::feel_probe`, the autopilot driving you at 60
+  frames a second): `stall`, `eye_jerk` (99th percentile; `eye_jerk_max` is contact), `head_g_lag` (ms by which the
+  head follows sideways g), `horizon_error` (degrees between the drawn roll and the neck's aim), `horizon_deg`,
+  `head_max_mm`, `felt_g_max`, `offset` (where the car ran across the track), tick and frame cost, `p99_ms`,
+  `over_8ms`. `--bench N` renders N whole frames offscreen at the window's size (mirror included) and waits for the
+  GPU: sim, compose and GPU means, the frame's p99 and frames over 8 ms (8 model cars + mirror at 1440×810: p99
+  about 6 ms in the cockpit). `simcraft-check` checks the kind (moving, controllable), that the action's args are the
+  axes, the buttons' and the autopilot's actions and args, and lists the photos, the model and the recordings.
+- **Line steering** (a game's choice, `games/race`): `T` toggles a button whose `toggle` sends two given `values`;
+  `line_marker: (prop, when)` draws the line the car steers by as a faint ribbon on the road ahead from outside.
+
+- **Play modes and badges:** a `cycle` button sends the next of several values after the car's own prop (G: CONTROL →
+  GUIDED → AUTOPILOT, reading `pilot`), so it agrees with whatever else changed it; a `badge` shows a prop by name
+  and colour on a clickable button bottom left (a click presses its key). `simcraft-check` checks both.
 
 ## Input: actions, schemes and contexts (`input.ron`)
 
@@ -748,7 +1136,69 @@ embedded, so the build is one self-contained artifact) and produces:
 | `macos` | `dist/<game>-macos/<Game>.app` (the layout a Steam or Epic depot takes; sign and notarize before upload) | Xcode command line tools |
 | `linux` / `windows` | native executable in `dist/<game>-<target>/` (Steam depots, Epic BuildPatchTool) | that target's toolchain |
 | `steam` | the native build plus SteamPipe scripts (`app_build.vdf`, one depot per OS) in `dist/<game>-steam/` | Steamworks app and depot ids (`--app`, `--depot`) |
-| `ios` / `android` | not yet: the same `sim-gpu` code, wrapped by Xcode / Gradle projects (IPA, AAB) | |
+| `ios` / `android` | `tools/mobile/build.sh ios\|android`: `sim-mobile` as a static library in an Xcode project (`xcodegen`; simulator, a paired iPhone over Wi-Fi with `ios phone`, and an archive for App Store Connect) or a shared library in a Gradle project (`NativeActivity`; APK for a device, AAB for Play) | Xcode 26 + iOS 26 SDK, `xcodegen`; JDK 17, Android SDK (API 36), NDK r28+ (16 KB pages), `cargo-ndk` |
+
+## Mobile core (`sim-mobile`)
+
+The phone is a host like any other: it displays, the core decides. The mobile core is designed from the types of
+casual mobile games (`docs/research/mobile-types.md`), not from any existing simcraft game.
+
+- **Shell.** winit + wgpu. iOS: `simcraft_mobile_main()` from a static library, called by the Xcode app's `main`.
+  Android: `android_main` in a shared library loaded by `NativeActivity`. On suspend the surface is dropped, on resume
+  it is recreated. Portrait.
+- **Loop.** A fixed simulation tick with interpolation between ticks; the frame rate never changes a result. The
+  loop waits (`ControlFlow::Wait`) and asks for each frame, which the display paces: winit's `Poll` never sleeps on
+  iOS (a whole core on a still screen, `tools/mobile/PERF.md`). A host draws only while something moves.
+- **Gestures** (`gesture`, pure and tested without a device): a finger's down, move and up become `Tap`, `Drag`,
+  `Swipe` and `Release` (pull and let go). The **swipe-across** test (the finger's segment this frame against a
+  shape's segments) catches or cuts a rope.
+- **Screen layers** (`layer`), back to front: `backdrop`, `board`, `pieces`, `fx`, `hud`, `overlay`. Every node has an
+  anchor (to the screen or to the safe area) and a render order. The HUD is a tree of controls bound to props and
+  actions; its art is a separate skin matched by node name (after AutoGameUI's split of UX and UI). The simulation
+  never sees a layer.
+- **Haptics** (`haptics`): `tap`, `thud`, `tick`, `rise`, `fall`, `buzz` with intensity and sharpness. No-op on the
+  desktop, Core Haptics on iOS, `VibrationEffect` on Android. Driven by bus events, never by the simulation.
+- **The player, compiled once.** A phone build (Xcode, Gradle) is slow and needs strong hardware, so it is not
+  the loop. The iOS and Android apps are one generic **simcraft player** each: all of `sim-mobile`, built once. A
+  mobile game is **data**: a scene file (board, ropes, pegs, bodies, HUD nodes, which event plays which haptic)
+  and its art, interpreted by the player. No game adds native code.
+- **Live link (development).** `simcraft serve <game>` on the developer's machine watches the game's files and
+  serves them on the local network. The player on a phone (or the iOS simulator, for anyone without a device)
+  connects (QR code or address), loads the bundle and reloads on every save. The phone sends back what happened on
+  it (touches as a replay, bus events, haptics played, frame times), so play on real hardware becomes eval data
+  next to the scripted players.
+- **Release.** The same player with the bundle embedded: publishing a game never compiles the engine.
+- **Desktop preview** (`simcraft-mobile`): the player in a phone-sized window, for quick checks; the phone is
+  where a game is judged.
+- **Mobile Capability Playground** (`playground`): where the mobile core's mechanics are tuned before a game uses
+  them, one card per capability, switched by tabs at the bottom of the safe area: `ROPE` (catch, pull, fling),
+  `TOUCH` (every finger with its id and trail; two fingers hold a rope's ends), `FEEL` (a pad for each haptic
+  kind, sliders for intensity and sharpness), `TILT` (a chain under the phone's real gravity, Core Motion). The
+  background is a workbench: a grid in world units (brighter every 4), marks where the safe area starts, and a
+  fading trail behind every finger, so distances, speeds and what the phone registered can be read by eye. Each
+  card adds its live values to the stats line. Sensors enter the simulation as whole numbers (tilt in
+  thousandths of g), so a replay includes them. Text is a 5×7 pixel font drawn with the same shapes.
+- **3D** (`draw3d`): a card may return a `Scene3` (a camera, a sun, instances of unit meshes: cube, sphere, cylinder,
+  cone), drawn before the 2D layers: a sun shadow map, hemisphere light, a chamfer on box edges from the shader
+  (a toy look without bevelled meshes), fog, 4× MSAA where the GPU offers it. A **fullscreen** card (`fullscreen()`)
+  has no workbench, header or tabs, and draws its own way back.
+- **SMASH** (`smash`, the app's first card): the first mobile game, a slingshot against a tower on a pedestal
+  (Smash Fest's family) on `rigid`. Its tuning is data, `games/smash/smash.ron` (embedded in the player); it is
+  developed eval-driven like a `game.ron` game, natively: `simcraft-smash eval [--save] [--set path=value]
+  [--check]` plays scripted shots through the same calls a finger makes and measures aim, aiming precision (cm per
+  px, linearity, reach, release roll, swim, parallax), camera (jerk, what is on screen), haptics (pulses a second),
+  solver (overlap, time); `simcraft-smash shot DIR [--level NAME]` renders frames of a shot without a window;
+  `simcraft-smash check` reads the tuning for the edit hook. Log: `games/smash/EVALS.md`.
+  - **Aim:** the pull picks a height on the tower (evenly, base to top) and sideways a point across it; the launch
+    angle is solved (low arc). The preview flies the solver's integrator with an exact sphere cast. A release
+    shoots the aim from 80 ms before the lift (a lifting finger rolls).
+  - **Camera:** a spring that follows a smoothed goal (bounded jerk); one point of interest (the stone, then where
+    it hit) with an eased push-in; parallax round the target: aiming and tilting the phone slide the eye while it
+    keeps looking at the tower; trauma² shake on real time.
+  - **Levels** are data in `smash.ron` (rows of pieces from the bottom, centred: `w s c g`, `=`/`#` beams, stones,
+    depth); a clear goes to the next level, out of stones retries, stars for stones left. The evals keep playing
+    one level (`FORTRESS`), so the series stays comparable as levels are added.
+  - Game time can slow (hit-stop, slow motion); camera, band and haptics run on real time.
 
 `simcraft-build --list` shows every target and whether this machine can build it.
 
@@ -779,6 +1229,16 @@ Grid → world: `x → X`, `y → −Z` (Unity) / `−Y` (Unreal), times `CellSi
 - [ ] Capabilities: pick renderer and quality per machine
 - [x] HD stage: `sim-gpu` (wgpu), `stage.ron`, `simcraft-play`, `simcraft-import`; colony3d in natural-history art
 - [x] First person: `track.ron`, 3D camera and fog, views, built-in camera effects, tunable position switch (game 8, `games/lanes`)
+- [x] Driving from the seat: `drive.ron`, a cockpit that moves like a head, the track built from its TrackDef, analog
+  keyboard axes into a declared action, a mirror rendered to a texture, a synthesised engine note (`games/race`)
+- [x] First person in a voxel world: `roam.ron`, WASD and mouse, crawlers (`cling`), exact reach (`SetFieldAt`), the
+  `field` request and structure evals (game 9, `games/mound`)
+- [x] Models: glTF import, instanced GPU skinning with PBR, the state-machine contract, `simcraft-model`, a rigged
+  photoreal termite (Higgsfield → Blender), macro laterite and mud textures
+- [x] Mound: an organic surface (surface nets), sun shadows, a macro lens and haze, crawlers on the drawn surface;
+  the colony no longer locks up carrying (tired arms, eval step 004)
+- [ ] Mound next: per-foot placement on walls (leg IK on the same bones, near termites only), grass stalks, replays
+  of your runs, a queen, the missing mud (8% of drops)
 - [x] Checking: `rustfmt.toml`, `simcraft-check`, the edit hook; `MoveBy` and the `clamped` warning
 - [x] Tracks: replays (`R`, `N`, `--replay`), lives meter, gone animations, hurt effect
 - [ ] Track next: a feel eval for switches (arrival time, overshoot, bank), text for scores, sound
