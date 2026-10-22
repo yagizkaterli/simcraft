@@ -5,6 +5,7 @@
 pub mod contact;
 pub mod driver;
 pub mod fixed;
+pub mod luau;
 pub mod rigid;
 pub mod track;
 pub mod vehicle;
