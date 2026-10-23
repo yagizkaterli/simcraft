@@ -1705,6 +1705,12 @@ impl DrivePlay {
             Ok(group) => {
                 self.engine.queue(group);
                 self.log.push(DrivePress { tick: self.world().tick, entity: id, action: action.into(), args });
+                // An accepted action from the driver clears the last refusal: a refusal recorded on the
+                // first tick (before the grid names the player) otherwise sat in the title for 4 s while
+                // the car was already answering the keys.
+                if Some(id) == self.driver() {
+                    self.refused = None;
+                }
                 true
             }
             Err(why) => {
