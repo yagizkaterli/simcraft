@@ -406,7 +406,8 @@ pub struct Look {
     pub liveries: Vec<Livery>,
 }
 
-/// One roadside billboard on the open road: the `sponsors` picture, on a post to the left of the road.
+/// One roadside billboard on the open road: a picture (`texture`, default `sponsors`) on a post to the left
+/// of the road.
 #[derive(Clone, Debug, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Billboard {
@@ -418,6 +419,9 @@ pub struct Billboard {
     /// The face's height above the ground (m): its bottom edge.
     #[serde(default = "billboard_height")]
     pub height: f32,
+    /// Which picture hangs here (`look.textures` name). None: `sponsors`.
+    #[serde(default)]
+    pub texture: Option<String>,
 }
 
 fn billboard_side() -> f32 {

@@ -67,12 +67,15 @@ Drive(
             "sky": (file: "race/sky.jpg", size: 90.0),
             // The one repeating sign of the slice.
             "sponsors": (file: "roadcase/mels.png", size: 4.0),
+            // The exit sign: the choice's name on the road, not only in the title.
+            "sign": (file: "roadcase/lantern.png", size: 4.0),
         },
         // No fence boards: the MEL sign is a roadside billboard, listed once per appearance.
         boards: (0.0, 1),
         billboards: [
             (at: 700.0, side: 9.0, height: 3.0),
             (at: 1900.0, side: 9.0, height: 3.0),
+            (at: 2250.0, side: 9.0, height: 3.0, texture: "sign"),
         ],
     ),
     units: "kmh",

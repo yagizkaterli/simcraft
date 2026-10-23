@@ -19,7 +19,7 @@ pub struct Photo {
 }
 
 /// The surfaces a picture can go on, and what `size` means there.
-pub const SURFACES: [(&str, &str); 16] = [
+pub const SURFACES: [(&str, &str); 17] = [
     ("asphalt", "the racing surface, tiled: metres a tile"),
     ("groove", "the rubbered racing line over the asphalt, streaks along the track: metres a tile"),
     ("apron", "the apron, tiled: metres a tile"),
@@ -36,6 +36,7 @@ pub const SURFACES: [(&str, &str); 16] = [
     ("banner", "the banner over the start/finish line: its height (m)"),
     ("sponsors", "sponsor boards on the catch fence, the picture split into `boards` panels: a board's height (m)"),
     ("logo", "the track's emblem on the infield grass: its width (m)"),
+    ("sign", "a roadside billboard's face of its own: its height (m)"),
 ];
 
 /// A picture that was found: where, its pixels' size, the world size of a copy, and the texture it is uploaded as.

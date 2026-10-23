@@ -390,12 +390,14 @@ fn open(track: &Track, look: &Look, photos: &Photos) -> Scene {
         }
     }
 
-    // Billboards: the `sponsors` picture, each entry one sign on a post to the left of the road.
-    if let Some(f) = photos.get("sponsors") {
+    // Billboards: one picture per face (`texture`, default `sponsors`), each entry one sign on a post
+    // to the left of the road.
+    for sign in &look.billboards {
+        let Some(f) = photos.get(sign.texture.as_deref().unwrap_or("sponsors")) else { continue };
         let mut b = Builder::new(&f.texture, Wrap::Clamp, sun);
         let panel_h = f.size;
         let panel_w = f.size * f.aspect();
-        for sign in &look.billboards {
+        {
             let s = sign.at.clamp(0.0, fl(track.length));
             let p = track.pose(fx(s), fx(fl(track.width) / 2.0 + sign.side));
             let (hx, hy) = (fl(p.x), fl(p.y));
@@ -1134,15 +1136,21 @@ mod tests {
             textures: std::collections::BTreeMap::from([
                 ("asphalt".to_string(), photo("race/asphalt.jpg", 4.0)),
                 ("sponsors".to_string(), photo("roadcase/mels.png", 4.0)),
+                ("sign".to_string(), photo("roadcase/lantern.png", 4.0)),
             ]),
-            billboards: vec![super::super::Billboard { at: 700.0, side: 9.0, height: 3.0 }, super::super::Billboard { at: 1900.0, side: 9.0, height: 3.0 }],
+            billboards: vec![
+                super::super::Billboard { at: 700.0, side: 9.0, height: 3.0, texture: None },
+                super::super::Billboard { at: 1900.0, side: 9.0, height: 3.0, texture: None },
+                super::super::Billboard { at: 2250.0, side: 9.0, height: 3.0, texture: Some("sign".into()) },
+            ],
             ..Look::default()
         };
         let photos = Photos::resolve(&dir, &look.textures);
         let s = build(&t, &look, &photos);
         let verts = |sc: &Scene, image: &str| sc.meshes.iter().filter(|m| m.image == image).map(|m| m.verts.len()).sum::<usize>();
         assert!(verts(&s, "__drive_photo_asphalt") > 0, "the road surface");
-        assert!(verts(&s, "__drive_photo_sponsors") == 2 * 6, "one quad per billboard: {:?}", verts(&s, "__drive_photo_sponsors"));
+        assert!(verts(&s, "__drive_photo_sponsors") == 2 * 6, "one quad per MEL billboard: {:?}", verts(&s, "__drive_photo_sponsors"));
+        assert!(verts(&s, "__drive_photo_sign") == 6, "the motel sign carries its own picture: {:?}", verts(&s, "__drive_photo_sign"));
         assert!(s.meshes.last().map(|m| m.image.as_str()) != Some(FENCE), "an open road has no catch fence");
         // The arms add road and end walls: the same highway without a fork is smaller.
         let without = {
