@@ -64,6 +64,218 @@ fn check_buttons(what: &str, buttons: &[Button], engine: &Engine<Running, Game>,
     }
 }
 
+/// A roam view names your kind, three actions that take `dx`, `dy`, `dz`, kinds, a smell field and a carried prop:
+/// each checked against the game.
+fn check_roam(roam: &sim_gpu::roam::Roam, engine: &Engine<Running, Game>, r: &mut Report) {
+    let game = engine.rules();
+    match game.def.kinds.get(&roam.you) {
+        None => r.error(format!("roam.ron: you are '{}', which the game does not have", roam.you)),
+        Some(k) => {
+            if !game.cfg.agent.controllable.contains(&roam.you) {
+                r.error(format!("roam.ron: '{}' is not controllable (engine.toml [agent] controllable)", roam.you));
+            }
+            if let Some(p) = &roam.actions.carrying
+                && !k.props.contains_key(p)
+            {
+                r.error(format!("roam.ron: carrying reads '{}.{p}', which has no such prop", roam.you));
+            }
+        }
+    }
+    let a = &roam.actions;
+    for name in [&a.crawl, &a.dig, &a.drop] {
+        match game.def.actions.iter().find(|x| &x.name == name) {
+            None => r.error(format!("roam.ron: action '{name}' is not declared (game.ron `actions`)")),
+            Some(x) if x.args != ["dx", "dy", "dz"] => {
+                r.error(format!("roam.ron: action '{name}' takes {:?}; the view passes [\"dx\", \"dy\", \"dz\"]", x.args))
+            }
+            _ => {}
+        }
+    }
+    for k in roam.kinds.keys().filter(|k| !game.def.kinds.contains_key(*k)) {
+        r.error(format!("roam.ron: draws kind '{k}', which the game does not have"));
+    }
+    // Models: the contract between the modelling tool's file and the game, checked both ways.
+    for (kind, body) in &roam.kinds {
+        let Some(spec) = &body.model else { continue };
+        let states = game.states_of(kind);
+        for (sel, _) in spec.clips.iter().filter(|(sel, _)| sel != "*") {
+            if !states.iter().any(|s| sim_state::in_label(s, sel)) {
+                r.error(format!("roam.ron: kind '{kind}' plays a clip in state '{sel}', which its machine does not have ({states:?})"));
+            }
+        }
+        if let Some(c) = &body.carries_in
+            && !states.iter().any(|s| sim_state::in_label(s, c))
+            && !game.def.kinds.get(kind).is_some_and(|k| k.props.contains_key(c))
+        {
+            r.error(format!("roam.ron: kind '{kind}' carries in '{c}', which is neither its state nor its prop"));
+        }
+        let wanted: Vec<&String> = spec.clips.iter().map(|(_, c)| c).chain(spec.still.iter()).collect();
+        for file in spec.files() {
+            let Some(m) = roam.models.get(file) else { continue };
+            for clip in wanted.iter().filter(|c| !m.clips.contains_key(c.as_str())) {
+                r.error(format!("roam.ron: {file} has no clip '{clip}' (it has {:?})", m.clips.keys().collect::<Vec<_>>()));
+            }
+            if let Some(socket) = spec.carry.as_ref().filter(|s| !m.nodes.contains_key(*s)) {
+                r.error(format!("roam.ron: {file} has no socket node '{socket}'"));
+            }
+            for mat in spec.textures.keys().filter(|t| !m.materials.iter().any(|x| &x.name == *t)) {
+                r.error(format!("roam.ron: {file} has no material '{mat}' to re-skin"));
+            }
+        }
+    }
+    if let Some(s) = &roam.smell
+        && !game.def.fields.contains_key(&s.field)
+    {
+        r.error(format!("roam.ron: smell reads field '{}', which the game does not declare", s.field));
+    }
+    if game.def.terrain.is_none() {
+        r.error("roam.ron: the game has no `terrain` to walk on".into());
+    }
+    let f = roam.feel;
+    if f.run < f.walk || f.height < f.eye || f.radius >= 0.5 {
+        r.warn(format!(
+            "roam.ron: feel: run {} < walk {}, eye {} above the body's height {}, or radius {} too wide for one voxel",
+            f.run, f.walk, f.eye, f.height, f.radius
+        ));
+    }
+}
+
+/// A drive view names its cars' kind (moving, controllable), an action whose args are exactly its axes, buttons
+/// and an autopilot switch that are declared actions with the args they pass. Returns what a player would press.
+fn check_drive(d: &sim_gpu::drive::Drive, engine: &Engine<Running, Game>, r: &mut Report) -> Vec<(String, String, BTreeMap<String, i64>)> {
+    let game = engine.rules();
+    let mut presses = Vec::new();
+    match game.def.kinds.get(&d.cars) {
+        None => r.error(format!("drive.ron: cars are kind '{}', which the game does not have", d.cars)),
+        Some(k) => {
+            if k.motion.is_none() {
+                r.error(format!("drive.ron: kind '{}' has no `motion` (the view reads px, py and yaw)", d.cars));
+            }
+            if !game.cfg.agent.controllable.contains(&d.cars) {
+                r.warn(format!("drive.ron: '{}' is not controllable (engine.toml [agent]): the keys will be refused", d.cars));
+            }
+            if let Some((p, _)) = &d.you
+                && !k.props.contains_key(p)
+            {
+                r.error(format!("drive.ron: you are the car whose '{p}' matches, and '{}' has no such prop", d.cars));
+            }
+        }
+    }
+    let mut later = Vec::new();
+    let mut want = |what: String, action: &str, args: Vec<&String>| {
+        let Some(a) = game.def.actions.iter().find(|a| a.name == action) else {
+            r.error(format!("drive.ron: {what} names action '{action}', which the game does not declare"));
+            return;
+        };
+        let mut have: Vec<&String> = args;
+        have.sort();
+        let mut takes: Vec<&String> = a.args.iter().collect();
+        takes.sort();
+        if have != takes {
+            r.error(format!("drive.ron: {what} passes {have:?} to '{action}', which takes {takes:?}"));
+        }
+    };
+    if let Some(c) = &d.controls {
+        want("controls".into(), &c.action, c.axes.keys().collect());
+        let full: BTreeMap<String, i64> = c.axes.keys().map(|k| (k.clone(), if k.contains("brake") { 0 } else { 600 })).collect();
+        presses.push((d.cars.clone(), c.action.clone(), full));
+        for b in &c.buttons {
+            let cycle_arg = b.cycle.as_ref().map(|c| &c.arg);
+            want(format!("key '{}'", b.key), &b.action, b.args.keys().chain(b.toggle.iter()).chain(cycle_arg).collect());
+            let mut args = b.args.clone();
+            args.extend(b.toggle.iter().map(|t| (t.clone(), b.values.map_or(1, |v| v.1))));
+            if let Some(c) = &b.cycle {
+                // Every value it cycles through must be one the action takes (pressed below, one by one).
+                if !k_props(game, &d.cars).contains(&c.prop) {
+                    later.push(format!("drive.ron: key '{}' cycles by prop '{}', which '{}' does not have", b.key, c.prop, d.cars));
+                }
+                for v in &c.values {
+                    let mut a = b.args.clone();
+                    a.insert(c.arg.clone(), *v);
+                    presses.push((d.cars.clone(), b.action.clone(), a));
+                }
+            }
+            presses.push((d.cars.clone(), b.action.clone(), args));
+        }
+    }
+    if let Some(a) = &d.autopilot {
+        want("autopilot".into(), &a.action, vec![&a.arg]);
+    }
+    for e in later {
+        r.error(e);
+    }
+    // The badge: its prop exists on the cars, and its key is one of the buttons.
+    if let Some(b) = &d.badge {
+        if !k_props(game, &d.cars).contains(&b.prop) {
+            r.error(format!("drive.ron: the badge shows prop '{}', which '{}' does not have", b.prop, d.cars));
+        }
+        if !d.controls.as_ref().is_some_and(|c| c.buttons.iter().any(|x| x.key == b.key)) {
+            r.error(format!("drive.ron: the badge presses key '{}', which no button has", b.key));
+        }
+    }
+    // The cars' model: loads and fits, or the view falls back to box cars (a mistake worth a warning).
+    match sim_gpu::drive::load_car_model(d, game) {
+        Ok(Some(m)) => r.notes.push(format!(
+            "drive model: {} triangles, fitted to {:.2} × {:.2} × {:.2} m, {} liveries",
+            m.model.triangles(),
+            m.size.0,
+            m.size.2,
+            m.size.1,
+            d.look.liveries.len()
+        )),
+        Ok(None) => r.notes.push("drive model: none (box cars)".into()),
+        Err(e) => r.warn(format!("drive.ron: {e} (box cars are drawn instead)")),
+    }
+    // Recordings: which are there, and what plays in place of each missing one.
+    let (found, missing): (Vec<_>, Vec<_>) = d.sound.inventory(&d.dir).into_iter().partition(|x| x.1.is_some());
+    r.notes.push(format!(
+        "drive audio: {} recording(s) found{}",
+        found.len(),
+        found
+            .iter()
+            .map(|x| format!("; {} = {}", x.0, x.1.as_ref().map_or(String::new(), |p| p.display().to_string())))
+            .collect::<Vec<_>>()
+            .concat()
+    ));
+    for (what, _, fallback) in &missing {
+        r.notes.push(format!("drive audio: {what}: no recording, {fallback}"));
+    }
+    // The spotter's lines: which calls have a voice, which stay silent (text only).
+    let calls = [
+        "car_low",
+        "car_high",
+        "three_wide",
+        "still_there",
+        "clear_low",
+        "clear_high",
+        "clear",
+        "green",
+        "white_flag",
+        "checkered",
+        "wreck",
+    ];
+    let (said, silent): (Vec<&str>, Vec<&str>) = calls.iter().partition(|c| d.sound.voice.line(&d.dir, c).is_some());
+    r.notes.push(format!(
+        "drive voice: {} ({}); silent: {}",
+        said.len(),
+        said.join(", "),
+        if silent.is_empty() { "none".to_string() } else { silent.join(", ") }
+    ));
+    // Pictures: a named one that is not there is a mistake (the surface quietly goes plain); the rest is listed.
+    let photos = sim_gpu::drive::photos::Photos::resolve(&d.dir, &d.look.textures);
+    for (k, why) in &photos.missing {
+        r.warn(format!("drive.ron: look.textures.{k}: {why} (drawn with the view's own picture instead)"));
+    }
+    let own: Vec<&str> = sim_gpu::drive::photos::SURFACES.iter().map(|s| s.0).filter(|k| photos.get(k).is_none()).collect();
+    r.notes.push(format!(
+        "drive photos: {} ({}); the view's own picture: {}",
+        photos.found.len(),
+        photos.found.keys().cloned().collect::<Vec<_>>().join(", "),
+        if own.is_empty() { "none".to_string() } else { own.join(", ") }
+    ));
+    presses
+}
+
 fn run(dir: &Path, ticks: u32) -> Report {
     let mut r = Report { errors: Vec::new(), warns: Vec::new(), notes: Vec::new() };
     let panels: Vec<PathBuf> = ["engine.toml", "play.toml"].iter().map(|p| dir.join(p)).filter(|p| p.exists()).collect();
@@ -128,6 +340,18 @@ fn run(dir: &Path, ticks: u32) -> Report {
                         }
                     }
                     Err(e) => r.error(format!("track.ron: {e}")),
+                }
+            }
+            if dir.join("drive.ron").exists() {
+                match sim_gpu::drive::load(dir, engine.rules()) {
+                    Ok((drive, _)) => presses.extend(check_drive(&drive, &engine, &mut r)),
+                    Err(e) => r.error(format!("drive.ron: {e}")),
+                }
+            }
+            if dir.join("roam.ron").exists() {
+                match sim_gpu::load_roam(dir) {
+                    Ok((roam, _)) => check_roam(&roam, &engine, &mut r),
+                    Err(e) => r.error(format!("roam.ron: {e}")),
                 }
             }
         }
@@ -258,4 +482,17 @@ fn main() {
         println!("note  {}: {n}", dir.display());
     }
     std::process::exit(if r.errors.is_empty() { 0 } else { 1 });
+}
+
+/// The props a kind's entities carry: its own, plus what the engine gives a moving kind and a vehicle.
+fn k_props(game: &sim_rules::Game, kind: &str) -> Vec<String> {
+    let Some(k) = game.def.kinds.get(kind) else { return Vec::new() };
+    let mut p: Vec<String> = k.props.keys().cloned().collect();
+    if k.motion.is_some() {
+        p.extend(sim_core::MOTION_PROPS.iter().map(|s| s.to_string()));
+    }
+    if k.vehicle.is_some() {
+        p.extend(sim_core::VEHICLE_PROPS.iter().chain(&sim_core::VEHICLE_INPUTS).map(|s| s.to_string()));
+    }
+    p
 }

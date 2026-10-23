@@ -83,3 +83,72 @@ First-person desert highway for `games/lanes`. Higgsfield `nano_banana_pro`; obj
 | `car_rear` | the same car from behind (hood as reference) | 52491bb4-3101-43e5-bad2-76f78242d183 |
 | `cactus`, `rock`, `post` | roadside scenery | 00545f81…, 45e8647d…, 063572f0… |
 | `btn_*` | chrome-rimmed midnight-blue badges: arrows, flame (dash), brake, jump, tap; `btn_pos1..4`: four lane stripes, one lit (the jump badge as reference) | 7aee37e7…, 3031f285…, aae2514c…, 218cfbc0…, 1b052772…, a3ba137d…, 434c2384…, 3aac2707…, f985158b…, 2f96debb… |
+
+## Termite model and mound textures (2026-09-29, `games/mound`)
+
+Realistic worker termite, from a photograph-like reference to a rigged, animated game model:
+
+1. Reference: Higgsfield `gpt_image_2_5`, two variants (jobs `88cec517-0c01-4a52-8373-18de17b0cc12`,
+   `7b2b6322-d9ad-423b-8a8d-2f1a68f8f778`): "Photorealistic macro studio photograph of a single worker termite
+   (Macrotermes), scientific specimen, three-quarter top view from front-left, ... all six legs spread outward and
+   fully separated from the body, ... plain pure white seamless background". `termite/ref_a.png` was used (legs
+   clearest).
+2. Mesh: image-to-3D on ref A, two models compared: Tripo H3.1 (`tripo_h3_1_image_to_3d`, detailed geometry and
+   texture, PBR, 60k faces; job `a7c4bdc6-11af-4d5f-a5bf-868302282288`) → 58k triangles, colour + ORM + normal maps
+   at 4096², crisp segments and hairs; Meshy 7 ultra (`meshy_v7_image_to_3d`; job
+   `abceb5e6-4018-4848-81a7-62d786a54791`) → 62k triangles, softer. Tripo kept (`termite/tripo.glb`, not in git).
+   Higgsfield's auto-rigging is humanoid-only, so the rig is ours:
+3. Rig, clips, levels of detail: `Blender -b --factory-startup --python tools/blender/rig_insect.py --
+   assets/src/termite/tripo.glb assets/models termite` → `assets/models/termite.glb` (12k triangles),
+   `_lod1` (3k), `_lod2` (800); 22 bones, the `carry` socket, clips `walk`, `carry`, `dig`, `idle`; textures 1024².
+   Check with `simcraft-model assets/models/termite.glb --game games/mound --kind termite`.
+
+Textures (`assets/mound/`, pack `assets/mound.ron`): Higgsfield `gpt_image_2_5`, then `tools/tileable.py` (1024²):
+- `laterite.png` (job `becc10e3-d722-4272-b01a-4ae8ea0cefd2`): "Seamless tileable texture, straight top-down
+  orthographic macro photograph of dry red-orange laterite savanna soil at insect scale: fine sand grains, tiny
+  rounded quartz pebbles and dust, ...".
+- `mud.png` (job `01a34889-d9a5-48b7-ac26-620b7aa8d37d`): "... a termite mound wall built from packed moist clay
+  pellets: rounded mud balls pressed together, dark red-brown laterite with a faint wet sheen ...".
+
+## Themes (`assets/themes/`, `assets/cyber.ron`, `assets/ocean.ron`, `assets/savanna.ron`) — 2026-09-29
+
+Three worlds for `games/highway_surfers` (CYBERRUN, BLUE OCEAN, SAVANNA STAMPEDE). Higgsfield `nano_banana_pro`
+(reported back as `nano_banana_2`) in the project "Highway Surfers themes"; objects cut with Higgsfield's image
+background remover; skies `simcraft-import --max 2048`; horizon bands `--white --bottom --tile 20 --max 2048` (the
+island band came out as two copies stacked: the upper half was kept); surfaces `tools/tileable.py --size 1024`;
+cut objects `--crop --max 512`. Music: Higgsfield `sonilo_music`, 60 s loops, converted to MP3 (`ffmpeg -c:a
+libmp3lame -q:a 5`).
+
+Style in every prompt: *stylized 3D mobile game art, clean vivid colors, no text*; objects *isolated on a plain flat
+pure white background, no shadow*; vehicles *straight-on rear view* / *straight-on front view*.
+
+| Theme | Sky, horizon, lane, shoulder | Pickup, props, rider | Low / mid / tall (rear, front) | Music |
+|---|---|---|---|---|
+| cyber | 0d5ee6a5, 1d22ee83, 727de61d, d538176b | 8e5d2ed7, d17f08f1, dd3711fa, 94c1dcfe | packet 9fa60d13 / c50ed6b9, transport 1de422bf / 3211f5fd, rack 7a7b72db / 5031afb8 | b3888f8a (synthwave, 128 bpm) |
+| ocean | 1b0db8fd, d5958192, 467ed617, 2e166ac8 | 430fdea7, 0c5457a2, 33079129, c6266cc9 | jet ski 436d4fb3 / f59bf759, speedboat 935898cf / 6e4cf4e7, ferry eba49104 / 10c850de | ce8247b9 (marimba, steel drums, 115 bpm) |
+| savanna | 27c7001a, ae73c1ca, 4f5515f9, a42b0ebb | e46d321b, 6eace251, 8299ba76, ecf2d27f | zebra 3c0d9c33 / ba6fb9f2, rhino 85b70346 / dd20a3a2, elephant e7a52520 / 96f7b172 | 605d3181 (djembe, kalimba, 124 bpm) |
+
+Known weak spots: the CYBERRUN runner is dark on a dark road (hard to see); the front elephant is cartoon-coloured
+while its rear is realistic; the riders are side-on, not from behind.
+
+## Race (`assets/race/`, the stock-car oval)
+
+Higgsfield project "Race: stock-car oval assets" (e4d407cd-55a9-4724-a25d-ecead7dab0fe), 2026-09-30. Sources in
+`assets/src/race/` (git-ignored); the game uses `assets/race/`. All brands are fictional ("Piedmont Motor
+Speedway", the six sponsors); the car has no logos. Opaque photographs are JPEG (quality 90, 29 → 4.5 MB); the
+tree line and the wheel keep their alpha as PNG, and the logo's white background was keyed out to alpha (flood fill
+from the corners, 1 px soft edge, 768 px) so it lies painted on the infield grass. The drive view maps them in
+`games/race/drive.ron` (`look.textures`).
+
+| game file | made from | job id |
+|---|---|---|
+| `stock_car.glb` | `gpt_image_2_5` white stock car (3/4 view) → Meshy `image_to_3d` (textured, PBR, 40k tris, symmetric); textures re-encoded to 2048 px (14 → 5.2 MB) | image e8964937-a2fa-43ee-a2cd-68cc2f72482d, 3D aabdfc4a-f247-4547-b145-19532daeaf35 |
+| `asphalt`, `groove`, `apron`, `grass`, `pit` | `gpt_image_2_5` top-down photos → `tools/tileable.py` (1024) | 192ed53b, ee693074, 05a94417, b31bf1e9, 12038b91 |
+| `safer`, `concrete`, `crowd`, `suites` | `gpt_image_2_5` front elevations → seamless left to right | bb947fd6, 09926139, d0ad02b7, 945368e2 |
+| `sky` | `gpt_image_2_5` panorama | 4aefc7c1 |
+| `trees`, `wheel` | `gpt_image_2_5` → background remover | bab0715c → 2b696c74; 145b5449 → db0973ca |
+| `banner`, `logo`, `sponsors`, `dash` | `gpt_image_2_5` | 8ea9c5e6, 624d66cb, f33f59bb, 0193da91 |
+| `voice/*.mp3` | `seed_audio` (voice "Grady"), trimmed, radio band-pass 300–3400 Hz, compressed (ffmpeg) | ed44170f, d6171d55, bf6b40d8, 45f0c7eb, 39d710f7, f2ecabdc, 3831637b, 4adf26df, 49e0eb67, 9416e78e, 8838adbe, 70df8718 |
+
+Engine, effects and music: CC0 recordings, downloaded by hand (`assets/src/race/audio/README.md` lists what and
+where); Higgsfield's music and effects models are only for its own game pipeline.

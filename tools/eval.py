@@ -7,18 +7,23 @@
 
 The designer declares the metrics in games/<name>/eval.toml (see docs/evals.md). Every run uses
 the same seeds, and simcraft is deterministic, so a saved eval is also a regression test.
-Standard library only.
+Standard library only; field metrics (evalmetrics.py) run compiled when tools/build_evalmetrics.sh has built them.
 """
 
 import argparse
 import collections
+import importlib.util
 import json
 import math
 import re
 import subprocess
 import sys
+import tempfile
 import tomllib
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+
+import evalmetrics  # field metrics; compiled by tools/build_evalmetrics.sh when available
 
 ROOT = Path(__file__).resolve().parent.parent
 AGENT = ROOT / "target" / "release" / "simcraft-agent"
@@ -44,6 +49,7 @@ class Run:
     """One seed: the numbers a metric expression can read."""
 
     def __init__(self, game_dir: Path, seed: int, cfg: dict, tmp: Path):
+        self.rate = tick_rate(game_dir)
         panel = tmp / f"panel_{seed}.toml"
         panel.write_text(panel_for((game_dir / "engine.toml").read_text(), seed, cfg["max_ticks"], cfg.get("set", ())))
         sim = subprocess.Popen(
@@ -64,10 +70,12 @@ class Run:
         self.series = collections.defaultdict(list)  # name -> [(tick, value)]
         self.errors = collections.Counter()
         self.result = None
+        self.structure = cfg.get("structure")
         every = cfg.get("sample_every", 20)
+        player = make_player(game_dir, cfg.get("player"), call, seed)
         self._sample(call, 0, call({"cmd": "step", "n": 0}))
         while True:
-            st = call({"cmd": "step", "n": every})
+            st = play_for(call, player, every) if player else call({"cmd": "step", "n": every})
             for e in st["events"]:
                 name = e["name"]
                 if name.startswith("error"):
@@ -94,6 +102,13 @@ class Run:
                 sums[f"sum.{e['kind']}.{prop}"] += v
         for name, v in sums.items():
             self.series[name].append((tick, v))
+        if self.structure:
+            reply = call({"cmd": "field", "name": self.structure["field"]})
+            if not reply.get("ok"):
+                sys.exit(f"[structure] field: {reply.get('error')}")
+            got = evalmetrics.structure(reply, self.structure.get("value", 1), self.structure.get("pillar", 4))
+            for name, v in got.items():
+                self.series[f"structure.{name}"].append((tick, v))
 
     def scope(self):
         s = self.series
@@ -103,6 +118,8 @@ class Run:
 
         return {
             "end_tick": self.end_tick,
+            "rate": self.rate,
+            "seconds": self.end_tick / self.rate,
             "result": self.result,
             "p": self.p,
             "events": self.events,
@@ -122,12 +139,55 @@ class Run:
         }
 
 
+def tick_rate(game_dir: Path) -> int:
+    """Ticks per second of game time (engine.toml [run] tick_rate, default 10)."""
+    return tomllib.loads((game_dir / "engine.toml").read_text()).get("run", {}).get("tick_rate", 10)
+
+
+def make_player(game_dir: Path, spec, call, seed: int):
+    """A scripted player from eval.toml's [player]: `module` (a .py file in the game), its `Player(info, seed, **args)`
+    class with `decide(observation) -> [{"do": action, "args": {...}}]`, called every `every` ticks; `near` limits
+    what it observes to that many cells around its entity (a large world)."""
+    if not spec:
+        return None
+    path = game_dir / spec["module"]
+    loaded = importlib.util.spec_from_file_location(f"player_{game_dir.name}", path)
+    module = importlib.util.module_from_spec(loaded)
+    loaded.loader.exec_module(module)
+    info = call({"cmd": "info"})
+    return module.Player(info, seed, **spec.get("args", {})), spec.get("every", 1), spec.get("near")
+
+
+def play_for(call, player, ticks: int) -> dict:
+    """`ticks` ticks with the player deciding every `every` ticks; one merged step report."""
+    policy, every, near = player
+    events, st = [], None
+    done = 0
+    while done < ticks:
+        obs = call({"cmd": "observe", "near": near} if near else {"cmd": "observe"})
+        me = obs.get("you") or []
+        acts = [dict(a, entity=me[0]) for a in policy.decide(obs)] if me else []
+        if acts:
+            call({"cmd": "act", "actions": acts})
+        n = min(every, ticks - done)
+        st = call({"cmd": "step", "n": n})
+        events += st["events"]
+        done += n
+        if st["done"]:
+            break
+    st["events"] = events
+    return st
+
+
 def evaluate(game_dir: Path, cfg: dict):
-    tmp = ROOT / "target" / "eval"
-    tmp.mkdir(parents=True, exist_ok=True)
+    base = ROOT / "target" / "eval"
+    base.mkdir(parents=True, exist_ok=True)
     per_seed, errors = {}, collections.Counter()
-    for seed in cfg["seeds"]:
-        run = Run(game_dir, seed, cfg, tmp)
+    # Each evaluation has its own panels (probes may run side by side); seeds run in parallel, one process each,
+    # and are read back in seed order, so the result is the same as one by one.
+    with tempfile.TemporaryDirectory(dir=base) as tmp, ThreadPoolExecutor() as pool:
+        runs = list(pool.map(lambda seed: Run(game_dir, seed, cfg, Path(tmp)), cfg["seeds"]))
+    for seed, run in zip(cfg["seeds"], runs, strict=True):
         errors.update(run.errors)
         scope = run.scope()
         per_seed[seed] = {}
@@ -174,6 +234,8 @@ def main():
     a = ap.parse_args()
     game_dir = (ROOT / a.game).resolve() if not a.game.is_absolute() else a.game
     cfg = tomllib.loads((game_dir / "eval.toml").read_text())
+    if "max_seconds" in cfg:  # lengths in game time survive a change of tick rate
+        cfg["max_ticks"] = int(cfg["max_seconds"] * tick_rate(game_dir))
     if a.set and a.save:
         sys.exit("--set is for trying; put the change in the game, then --save")
     cfg["set"] = a.set
