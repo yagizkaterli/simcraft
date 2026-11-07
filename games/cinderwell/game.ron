@@ -1,0 +1,214 @@
+#![enable(implicit_some)]
+// CINDERWELL — original 2.5D vertical shaft (OYUN-3).
+//
+// Industrial-ecology flue: draft pulls Kor (embers) up the shaft. Cooling Kor
+// sheds Culuf (clinker) that slides down the walls and cakes the hearth.
+// Kul (ash) falls and feeds the ash field. Enough Culuf mass at the bottom
+// seals the well (hidden Baca). Not kok/brood/meydan/commons.
+// Deterministic: no_float, only_i64. Senses perception.
+Game(
+    name: "cinderwell",
+
+    fields: {
+        "heat":  (init: 0, diffusion: 10),
+        "ash":   (init: 0, diffusion: 2, decay: 1),
+        "draft": (init: 0, diffusion: 7, decay: 1),
+        "wall":  (init: 0),
+    },
+    terrain: "wall",
+
+    kinds: {
+        "kor": (glyph: 'K', fsm: "kor",
+                props: { "energy": 100, "age": 0, "rises": 0, "shed": 0 },
+                senses: {
+                    "clock": "tick",
+                    "heat_here": r#"field("heat")"#,
+                    "draft_here": r#"field("draft")"#,
+                    "draft_up": r#"field_at("draft", 0, 0, -1)"#,
+                    "wall_up": r#"field_at("wall", 0, 0, -1)"#,
+                    "culuf_n": "count.culuf",
+                    "kul_n": "count.kul",
+                }),
+        "kul": (glyph: 'a', fsm: "kul",
+                props: { "mass": 2, "age": 0 },
+                senses: {
+                    "wall_down": r#"field_at("wall", 0, 0, 1)"#,
+                }),
+        "culuf": (glyph: 'C', fsm: "culuf",
+                  props: { "mass": 5, "age": 0 },
+                  senses: {
+                      "clock": "tick",
+                      "ash_here": r#"field("ash")"#,
+                      "heat_here": r#"field("heat")"#,
+                      "wall_down": r#"field_at("wall", 0, 0, 1)"#,
+                      "kor_near": r#"around("kor", 3)"#,
+                      "culuf_n": "count.culuf",
+                      "kor_n": "count.kor",
+                  }),
+        "baca": (glyph: ' ', hidden: true, props: { "sealed": 1 }),
+    },
+
+    params: {
+        "rise_cost": 3,
+        "cool_threshold": 50,
+        "ash_rate": 3,
+        "draft_strength": 6,
+        "seal_need": 14,
+        "seal_count": 3,
+        "heat_sip": 6,
+        "glow_burn": 1,
+        "shed_cost": 8,
+        "kul_every": 2,
+        "max_culuf": 30,
+        "max_kul": 24,
+        "bottom_z": 14,
+        "max_ticks": 500,
+    },
+
+    layout: (
+        cells: {
+            'W': { "wall": 1, "heat": 0,  "ash": 0, "draft": 0  },
+            '.': { "wall": 0, "heat": 8,  "ash": 0, "draft": 10 },
+            'd': { "wall": 0, "heat": 10, "ash": 0, "draft": 24 },
+            'h': { "wall": 0, "heat": 50, "ash": 2, "draft": 12 },
+            'm': { "wall": 0, "heat": 30, "ash": 1, "draft": 16 },
+            'o': { "wall": 0, "heat": 14, "ash": 0, "draft": 18 },
+        },
+        legend: { 'K': "kor" },
+        levels: [
+            ["WWWddd.dddWWW"],
+            ["WWWoo...ooWWW"],
+            ["WWWoo...ooWWW"],
+            ["WW.oo...oo.WW"],
+            ["WW........WWW"],
+            ["WW........WWW"],
+            ["WW...K....WWW"],
+            ["WW........WWW"],
+            ["WW...mm...WWW"],
+            ["WW...mm...WWW"],
+            ["WW..mmmm..WWW"],
+            ["WW..mmmm..WWW"],
+            ["WWW.hhhh.WWWW"],
+            ["WWW.hhhh.WWWW"],
+            ["WWWhhhhhhWWWW"],
+        ],
+    ),
+
+    fsms: {
+        "kor": (
+            initial: "Live",
+            states: {
+                "Live": (rules: [
+                    (name: "kor_age", then: [ Add("age", "1") ]),
+                    (name: "kor_sip_heat",
+                     when: "sense.heat_here > 0 && me.energy < 180",
+                     then: [
+                         Add("energy", "min(p.heat_sip, sense.heat_here)"),
+                         SetField("heat", "max(0, sense.heat_here - p.heat_sip)"),
+                     ]),
+                    (name: "kor_burn", then: [ Add("energy", "-p.glow_burn") ]),
+                    (name: "kor_rise",
+                     when: "me.z > 0 && sense.wall_up == 0 && sense.draft_up >= p.draft_strength && me.energy >= p.rise_cost",
+                     then: [
+                         Move3("0", "0", "-1"),
+                         Add("energy", "-p.rise_cost"),
+                         Add("rises", "1"),
+                         Emit("rise"),
+                     ]),
+                    (name: "kor_drift_left",
+                     when: "sense.draft_here < p.draft_strength && me.id % 2 == 1 && me.x > 1",
+                     then: [ Move3("-1", "0", "0") ]),
+                    (name: "kor_drift_right",
+                     when: "sense.draft_here < p.draft_strength && me.id % 2 == 0 && me.x < 11",
+                     then: [ Move3("1", "0", "0") ]),
+                    (name: "kor_shed_culuf",
+                     when: "me.energy <= p.cool_threshold && me.energy > 0 && sense.culuf_n < p.max_culuf",
+                     then: [
+                         Spawn("culuf"),
+                         Add("energy", "-p.shed_cost"),
+                         Add("shed", "1"),
+                         Emit("shed"),
+                     ]),
+                    (name: "kor_drop_kul",
+                     when: "me.shed > 0 && me.shed % p.kul_every == 0 && sense.kul_n < p.max_kul && me.energy > 0",
+                     then: [ Spawn("kul"), Emit("flake") ]),
+                    (name: "kor_extinguish",
+                     when: "me.energy <= 0",
+                     then: [ Emit("out"), Despawn(Me) ]),
+                ]),
+            },
+        ),
+
+        "kul": (
+            initial: "Fall",
+            states: {
+                "Fall": (rules: [
+                    (name: "kul_age", then: [ Add("age", "1") ]),
+                    (name: "kul_ash", then: [ AddField("ash", "p.ash_rate") ]),
+                    (name: "kul_fall",
+                     when: "me.z < p.bottom_z && sense.wall_down == 0",
+                     then: [ Move3("0", "0", "1") ]),
+                    (name: "kul_settle",
+                     when: "me.z >= p.bottom_z || sense.wall_down != 0",
+                     then: [ AddField("ash", "me.mass"), Emit("settle"), Despawn(Me) ]),
+                ]),
+            },
+        ),
+
+        "culuf": (
+            initial: "Deposit",
+            states: {
+                "Deposit": (rules: [
+                    (name: "culuf_age", then: [ Add("age", "1") ]),
+                    // Slide down the shaft toward the hearth (seal lives at the bottom).
+                    (name: "culuf_slide",
+                     when: "me.z < p.bottom_z && sense.wall_down == 0",
+                     then: [ Move3("0", "0", "1") ]),
+                    (name: "culuf_absorb",
+                     when: "sense.ash_here > 0",
+                     then: [
+                         Add("mass", "min(3, sense.ash_here)"),
+                         SetField("ash", "max(0, sense.ash_here - 3)"),
+                     ]),
+                    (name: "culuf_bake",
+                     when: "me.z >= 11 && sense.heat_here > 8 && me.mass < 40",
+                     then: [ Add("mass", "1") ]),
+                    (name: "culuf_hearth",
+                     when: "me.z >= 12 && sense.heat_here < 40",
+                     then: [ AddField("heat", "6") ]),
+                    (name: "culuf_seal_mass",
+                     when: "me.z >= 12 && me.mass >= p.seal_need",
+                     then: [ Spawn("baca"), Emit("seal") ]),
+                    (name: "culuf_seal_cluster",
+                     when: "me.z >= 12 && sense.culuf_n >= p.seal_count && me.mass >= 5",
+                     then: [ Spawn("baca"), Emit("seal") ]),
+                    (name: "rekindle",
+                     when: "sense.kor_n == 0 && me.mass >= 6 && me.z >= 11 && sense.heat_here > 10",
+                     then: [ Spawn("kor"), Add("mass", "-3"), Emit("rekindle") ]),
+                ]),
+            },
+        ),
+    },
+
+    rules: [
+        // Sparse draft refresh (budget): only on paced ticks.
+        (name: "draft_refresh", for: "kor",
+         when: "pace(3)",
+         then: [ AddField("draft", "6") ]),
+    ],
+
+    actions: [
+        (name: "fan_draft", for: "kor",
+         then: [ AddField("draft", "p.draft_strength * 3"), Emit("fan") ]),
+        (name: "stoke_heat", for: "kor",
+         then: [ AddField("heat", "16"), Add("energy", "10"), Emit("stoke") ]),
+    ],
+
+    score: "me.rises * 5 + me.shed * 8 + count.culuf * 12 + count.baca * 100 + me.energy / 5",
+
+    end: [
+        (when: "count.baca > 0", result: "sealed"),
+        (when: "count.kor == 0 && count.culuf == 0", result: "cold"),
+        (when: "tick >= p.max_ticks", result: "time"),
+    ],
+)
