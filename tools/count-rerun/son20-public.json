@@ -1,0 +1,26 @@
+[
+ {
+  "r": "simcraft",
+  "n": 1,
+  "t": "7e39ead56e95",
+  "b": "## Kapsam\n- 9 ozgun oyun: cache, conveyor, drift, forge, harbor, mycelium, pollen_drift, pulse, ripple\n- colony3d: 3D gorunumler (diorama/layers/generated), feel-evals (spring camera, walk bob)\n- lanes: araba oyunu (track.ron, barrier/car/coin)\n- TASK-TERMIT-MOUND-LANES.capsule: unit gorevi (thermit mound yeni + lanes gelistirme)\n\n## Kanit\n- simcraft-view --dump 30 kareler alindi: 8/9 yeni oyun rc=0\n- colony3d: 2D + 2 adet 3D projeksiyon paneli, seasons/trends calisiyor\n- lanes: coin olaylari tick 27-29, barrier 70\n\n## Bilinen sorun\n- pollen_drift yuklenmiyor: engine.toml [switches] 'initial_bloom' kurali tanimsiz (grep crates/ bos). Ayri is.\n\n## Kisit\n- main'e direkt push yok; bu PR hatti. Review sonrasi merge."
+ },
+ {
+  "r": "simcraft",
+  "n": 2,
+  "t": "90c836b4c1af",
+  "b": "scv2-firstmate: OYUN-1 kok (ozgun 2.5D kok-organizma)\n\n- Branch: unit/scv2-oyun1-2.5d (from 7e39ead + firstmate marker)\n- Claim: iz/OYUN-1-CLAIM-V2.json (scv2-lider)\n- Design: iz/OYUN-1-KOK-TASARIM.json\n- simcraft-check: PASS rc=0 (no warn, 300 ticks ok, only notes on cost)\n  Binary: $CARGO_TARGET_DIR/release/simcraft-check\n  Output: ok loads + views + presses; hottest extend_left/right\n- 2.5D: stage.ron + simcraft-play --shot (lavapipe) per V2-adaptor-olcum-kok.json\n  Evidence: iz/receipts/shot-kok.png + play-kok.txt + check-kok.txt\n- Only touched: games/kok/** (5 files)\n- No: floats, hashmap, core game logic, other games, snaps\n- Next: jev-gate + pr-otomerge\n\nKisit met: AGENTS.md, architecture, claim."
+ },
+ {
+  "r": "simcraft",
+  "n": 3,
+  "t": "6a7ff5e7c997",
+  "b": "## Summary\n- `games/pollen_drift/engine.toml` `[switches]` named `initial_bloom`, but `game.ron` defines no rule or action with that name.\n- `simcraft-check` refused to load the game. Removing the switch lets it load and run 300 ticks with presses.\n\n## Evidence\n- `simcraft-check games/pollen_drift` → `ok` (exit 0) on commit `6a7ff5e`.\n- Note, not a failure: `set_colour` did not fire in 300 ticks (3 entities, no spread rule). Not changed here.\n\n## Scope\nOnly `games/pollen_drift/engine.toml`. Does not touch `games/kok` or other in-flight games."
+ },
+ {
+  "r": "simcraft",
+  "n": 4,
+  "t": "16d869172b5e",
+  "b": "## OYUN-2 brood\n- ozgun kalitsal beden secilimi (bulk/legs/diet)\n- simcraft-check PASS (rc=0)\n- agent hash 0a8a3e9144d6c981 tick400 x2 match\n- kanit: iz/receipts/check-brood-live.txt + play-brood-1/2.txt\n\n## Kisit\n- yalniz games/brood/**\n- main push yok"
+ }
+]
