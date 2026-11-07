@@ -1,0 +1,8 @@
+# ─────────────────────────────────────────────────────────────
+#  PLAYER PANEL (kabile) — what `simcraft-play` runs.
+#  The actors walk their scripted FSM paths; no controllable entity (v0).
+# ─────────────────────────────────────────────────────────────
+
+[run]
+seed = 1
+max_ticks = 400

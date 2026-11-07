@@ -1,0 +1,8 @@
+# ─────────────────────────────────────────────────────────────
+#  KABİLE — HERAKLES SIM dünyası (kabile-16x16-v1) operatör paneli.
+#  Deterministik: aynı seed → aynı kare. Dünya boyutu `layout`tan gelir (16×16).
+# ─────────────────────────────────────────────────────────────
+
+[run]
+seed = 1
+max_ticks = 400
