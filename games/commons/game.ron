@@ -1,0 +1,159 @@
+#![enable(implicit_some)]
+// Commons — an original 2.5D social dwelling.
+// Kin are small communal creatures who live on the galleries of a shared hall.
+// They gather around a single Hearth whose warmth spreads as a field. Too far from it a
+// kin's spirit cools and it goes seeking warmth or company; pressed too close the crowd
+// itself wears it down. A kin that loses all spirit withdraws, then leaves.
+// The community keeps the fire alive simply by being near it: the player is the Keeper
+// and may stoke the hearth when the fire runs low.
+// Score: the community the hall still holds when time runs out.
+Game(
+    name: "commons",
+    perception: Direct,
+
+    // Warmth is a field in centi-units. The hearth adds it, it diffuses through the hall
+    // and leaks away; the air at a kin's own voxel is the temperature it feels (0..10000).
+    fields: {
+        "warmth": (init: 0, diffusion: 22, decay: 3),
+    },
+
+    kinds: {
+        "wall":   (glyph: '#', solid: true),
+        "hearth": (glyph: '&', solid: true, fsm: "hearth",
+                   props: { "fuel": 90, "kept": 0 }),
+        "kin":    (glyph: 'k', fsm: "kin",
+                   props: { "spirit": 12, "age": 0 },
+                   glyphs: { "Content": 'k', "Seeking": 's', "Withdrawn": 'x' }),
+        "door":   (glyph: 'D'),
+    },
+
+    params: {
+        "spirit_max": 20,
+        "spirit_decay": 1,       // spirit lost every tick, warmth or not
+        "warm_gain": 2,          // spirit gained each tick in warm air
+        "cold_loss": 1,          // spirit lost each tick in cold air
+        "company_gain": 1,       // spirit gained each tick beside another kin
+        "crowd_at": 4,           // more than this many neighbours is a crowd
+        "crowd_loss": 1,         // spirit lost each tick in a crowd
+        "seek_below": 8,         // below this a kin goes looking for warmth and company
+        "content_at": 14,        // at least this and it settles
+        "withdraw_at": 3,        // at most this and it withdraws
+        "hearth_burn": 160,      // warmth the hearth adds while it burns
+        "fuel_decay": 1,         // fuel lost each tick
+        "tend_radius": 2,        // kin within this range keep the fire fed
+        "tend_gain": 2,          // fuel the community restores each tick
+        "arrive_every": 10,      // a newcomer arrives at the door this often
+        "max_kin": 40,
+        "ticks": 400,
+    },
+
+    layout: (
+        legend: { '#': "wall", '&': "hearth", 'k': "kin", 'D': "door" },
+        levels: [
+            [ // level 0: the hall floor
+                "################",
+                "#...........D..#",
+                "#..............#",
+                "#......&.......#",
+                "#..............#",
+                "#...k........k.#",
+                "#..............#",
+                "#.....k........#",
+                "#..............#",
+                "################",
+            ],
+            [ // level 1: the upper gallery
+                "################",
+                "#..............#",
+                "#...k......k...#",
+                "#..............#",
+                "#.......k......#",
+                "#..............#",
+                "#...k......k...#",
+                "#..............#",
+                "#..............#",
+                "################",
+            ],
+        ],
+    ),
+
+    fsms: {
+        "hearth": (
+            initial: "Lit",
+            states: { "Lit": (), "Cold": () },
+            transitions: [
+                (from: "Lit",  to: "Cold", when: "me.fuel <= 0"),
+                (from: "Cold", to: "Lit",  when: "me.fuel > 0"),
+            ],
+        ),
+        "kin": (
+            initial: "Content",
+            states: { "Content": (), "Seeking": (), "Withdrawn": () },
+            transitions: [
+                (from: "Content",   to: "Seeking",   when: "me.spirit < p.seek_below"),
+                (from: "Seeking",   to: "Content",   when: "me.spirit >= p.content_at"),
+                (from: "*",         to: "Withdrawn", when: "me.spirit <= p.withdraw_at"),
+                (from: "Withdrawn", to: "Seeking",   when: "me.spirit > p.withdraw_at"),
+            ],
+        ),
+    },
+
+    rules: [
+        // --- the hearth: the fire the hall gathers around ---
+        (name: "hearth_emit", for: "hearth", state: "Lit",
+         then: [ AddField("warmth", "p.hearth_burn") ]),
+        (name: "hearth_fuel", for: "hearth",
+         when: "me.fuel > 0", then: [ Add("fuel", "-p.fuel_decay") ]),
+        // The community keeps the fire: kin near the hearth feed it.
+        (name: "hearth_tended", for: "hearth", state: "Lit",
+         when: r#"around("kin", p.tend_radius) > 0"#,
+         then: [ Add("fuel", "p.tend_gain") ]),
+
+        // --- the door: newcomers arrive while there is room ---
+        (name: "arrivals", for: "door",
+         when: r#"count.kin < p.max_kin && tick % p.arrive_every == 0"#,
+         then: [ Spawn("kin"), Emit("arrived") ]),
+
+        // --- kin: what they feel ---
+        (name: "kin_age", for: "kin", then: [ Add("age", "1") ]),
+        (name: "kin_spirit_decay", for: "kin", then: [ Add("spirit", "-p.spirit_decay") ]),
+        (name: "kin_warm", for: "kin",
+         when: r#"field("warmth") > 800"#, then: [ Add("spirit", "p.warm_gain") ]),
+        (name: "kin_cold", for: "kin",
+         when: r#"field("warmth") <= 200"#, then: [ Add("spirit", "-p.cold_loss") ]),
+        (name: "kin_company", for: "kin",
+         when: r#"around("kin", 1) > 0"#, then: [ Add("spirit", "p.company_gain") ]),
+        (name: "kin_crowded", for: "kin",
+         when: r#"around("kin", 1) > p.crowd_at"#, then: [ Add("spirit", "-p.crowd_loss") ]),
+
+        // --- kin: seeking, settling, withdrawing ---
+        // Cold: climb the warmth field toward the hearth.
+        (name: "kin_seek_warmth", for: "kin", state: "Seeking",
+         when: r#"field("warmth") <= 200"#, then: [ ClimbField("warmth") ]),
+        // Warm but alone: find another kin.
+        (name: "kin_seek_company", for: "kin", state: "Seeking",
+         when: r#"field("warmth") > 200 && around("kin", 1) == 0"#, then: [ MoveToward("kin") ]),
+        (name: "kin_restless", for: "kin", state: "Seeking", then: [ Wander ]),
+        // Settled but crowded: step out of the press.
+        (name: "kin_crowd_away", for: "kin", state: "Content",
+         when: r#"around("kin", 1) > p.crowd_at"#, then: [ MoveAway("kin") ]),
+        (name: "kin_stroll", for: "kin", state: "Content", then: [ Wander ]),
+
+        // --- kin: leaving ---
+        (name: "kin_leave", for: "kin",
+         when: "me.spirit <= 0", then: [ Despawn(Me), Emit("left") ]),
+    ],
+
+    actions: [
+        // The Keeper: feed the fire when it runs low.
+        (name: "stoke", for: "hearth", when: "me.fuel < p.hearth_burn * 2",
+         then: [ Add("fuel", "p.hearth_burn * 3"), Add("kept", "1"), Emit("stoked") ]),
+    ],
+
+    end: [
+        (when: "count.kin == 0", result: "abandoned"),
+        (when: "tick >= p.ticks", result: "time"),
+    ],
+
+    score: r#"count.kin * 10 + me.fuel"#,
+)

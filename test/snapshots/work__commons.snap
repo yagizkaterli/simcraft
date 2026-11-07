@@ -1,0 +1,15 @@
+---
+source: test/tests/all/work.rs
+expression: profile(&dir)
+---
+ticks 18, entities per tick 103.1
+per tick:        evals      49.5  queries     26.8  maps      6.1
+per entity-tick: evals      0.48  queries     0.26  maps     0.06
+hottest rules (checks per tick, % that fired):
+  kin_age                        5.1  100.0%
+  kin_cold                       5.1   93.5%
+  kin_company                    5.1   41.3%
+  kin_crowded                    5.1    0.0%
+  kin_leave                      5.1   10.9%
+  kin_spirit_decay               5.1  100.0%
+checked but never fired: kin_crowded, kin_warm, kin_crowd_away, kin_seek_company

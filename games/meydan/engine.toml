@@ -1,0 +1,23 @@
+# ─────────────────────────────────────────────────────────────
+#  STEAM ENGINE — operator panel (meydan)
+#  Two seats share one square. An agent speaks with {"as": "alice"} and
+#  may only act for its own neighbour. What one feeds, the other feels.
+# ─────────────────────────────────────────────────────────────
+
+[run]
+seed = 7
+max_ticks = 300
+
+[params]
+days = 240
+
+[agent]
+controllable = ["neighbor"]
+seats = { alice = 1, bob = 2 }
+observe_radius = 6
+
+# Event bus: every action, event and tick hash, in order.
+# `log` is a replayable record: simcraft-agent games/meydan --replay runs/meydan.jsonl
+[bus]
+log = "runs/meydan.jsonl"
+# listen = "127.0.0.1:7879"

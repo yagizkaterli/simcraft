@@ -1,0 +1,14 @@
+---
+source: test/tests/all/work.rs
+expression: profile(&dir)
+---
+ticks 60, entities per tick 31.9
+per tick:        evals     316.5  queries    120.2  maps     78.2
+per entity-tick: evals      9.92  queries     3.77  maps     2.45
+hottest rules (checks per tick, % that fired):
+  bloom                         16.0    9.7%
+  body_heat                      8.9  100.0%
+  brood                          8.9    1.1%
+  burn                           8.9  100.0%
+  east                           8.9   34.2%
+  first_breath                   8.9    4.1%
