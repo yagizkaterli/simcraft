@@ -1,0 +1,52 @@
+[package]
+name = "sim-mobile"
+description = "The mobile core: iOS and Android shell (winit + wgpu), gestures, screen layers, haptics"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+# A static library for the Xcode app, a shared library for Android's NativeActivity, and an ordinary library for
+# the desktop preview and tests (docs/architecture.md, Mobile core).
+[lib]
+crate-type = ["rlib", "staticlib", "cdylib"]
+
+[[bin]]
+name = "simcraft-mobile"
+path = "src/bin/simcraft-mobile.rs"
+
+[[bin]]
+name = "simcraft-smash"
+path = "src/bin/simcraft-smash.rs"
+
+[dependencies]
+sim-physics.workspace = true
+# The engine itself: bundled games (game.ron) run on the phone exactly as the evals run them.
+sim-core.workspace = true
+sim-rules.workspace = true
+wgpu = "29"
+winit = "0.30"
+pollster = "0.4"
+bytemuck = { version = "1", features = ["derive"] }
+# Games as data: SMASH's tuning (games/smash/smash.ron) is embedded, and read from disk by the eval tool.
+serde.workspace = true
+ron.workspace = true
+
+# iOS: Core Haptics and Core Motion, through the same objc2 bindings wgpu already uses.
+[target.'cfg(target_os = "ios")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = "0.3"
+objc2-core-haptics = "0.3"
+objc2-core-motion = "0.3"
+
+# The desktop's screenshot tool (`simcraft-smash shot`) writes PNGs.
+[target.'cfg(not(any(target_os = "ios", target_os = "android")))'.dependencies]
+image = { version = "0.24", default-features = false, features = ["png"] }
+# The eval tool reads eval.toml and its own saved steps.
+toml.workspace = true
+serde_json.workspace = true
+
+[target.'cfg(target_os = "android")'.dependencies]
+winit = { version = "0.30", features = ["android-native-activity"] }
+
+[lints]
+workspace = true

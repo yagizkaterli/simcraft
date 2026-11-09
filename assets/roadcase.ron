@@ -1,0 +1,8 @@
+#![enable(implicit_some)]
+// Roadcase pack: our own sprite library on top of the desert road pack.
+// First entry is the one billboard the spec allows to repeat: MEL'S DINER - 22 MILES.
+Assets(
+    images: {
+        "mels": "roadcase/mels.png",
+    },
+)

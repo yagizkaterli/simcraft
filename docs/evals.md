@@ -42,10 +42,52 @@ A metric is a Python expression over one run:
 | series `state.<kind>.<state>` | Entities of a kind in a state (active part, e.g. `state.ground.Trail`) |
 | series `sum.<kind>.<prop>` | Sum of a prop over a kind, e.g. `sum.nest.food` |
 
+`max_seconds` instead of `max_ticks` gives the length in game time (it survives a change of tick rate); `seconds` and
+`rate` (ticks a second) are in scope.
+
+**A player** (`highway_surfers`): a game measured *as played* names a scripted player. `module` is a Python file in
+the game with a `Player(info, seed, **args)` class whose `decide(observation)` returns actions
+(`[{"do": "hop", "args": {"dir": -1}}]`); it decides every `every` ticks. Same seeds, same player: still deterministic.
+
+```toml
+[player]
+module = "bot.py"
+args = { skill = 80 }   # passed to Player
+every = 2
+```
+
 Metrics are averaged over seeds (mean, min, max). Make metrics honest when the game breaks: a "first time" metric
 should not reward a game that ends before the event could happen (give it the worst value instead).
+
+## Feel
+
+How a game *looks in motion* is measured apart from how it plays: `simcraft-play <game> --feel` (a roam view: a
+scripted walker; a track: `--replay RUN` played headless at 60 frames a second through the renderer's own code, with
+`stall`, `step_ratio`, `eye_jerk`, `rider_jerk`, cost). Logged in `games/<name>/FEEL.md`, raw in `feel-evals/`.
 
 ## Example
 
 `games/colony`: [`eval.toml`](../games/colony/eval.toml), [`EVALS.md`](../games/colony/EVALS.md). Step 003 there
 broke the game; the eval showed it at once.
+
+## Structures (fields)
+
+A game that builds (a mound, a trail) is measured from a field, not from entities:
+
+```toml
+[structure]
+field = "mud"   # the field to read ({"cmd":"field"} at every sample)
+value = 2       # the voxels that count as built
+pillar = 4      # a column with at least this many is a pillar
+```
+
+Series: `structure.built`, `structure.height` (tallest column), `structure.stacking` (for each built voxel, how many
+built voxels share its column, averaged: about 1 for scattered work, high when work lands on work),
+`structure.pillars`, `structure.roofs` (built voxels over open air: arches, overhangs). Stacking grows with density
+too (when much is built, even random drops land on each other), so compare it with a control at the same settings
+(the same step with the behaviour under test switched off), not across very different amounts built.
+
+These metrics read every voxel of every sample, so they live in `tools/evalmetrics.py`, written in Cython's
+pure-Python mode: plain Python everywhere, compiled to C by `tools/build_evalmetrics.sh` where Cython is available
+(`uv run --with cython`; about 6x faster). `python3 tools/evalmetrics.py` checks both give the same numbers. ruff
+(`ruff.toml`) lints the eval code, perf rules included.

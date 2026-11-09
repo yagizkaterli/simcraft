@@ -1,0 +1,27 @@
+name: roadcase
+on:
+  pull_request:
+    paths:
+      - "games/roadcase/**"
+      - "games/roadcase-roblox/**"
+      - "crates/sim-physics/**"
+      - "crates/sim-gpu/**"
+      - "crates/sim-rules/**"
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: system libs (audio, input, display)
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libasound2-dev libudev-dev libxkbcommon-dev libwayland-dev
+      - name: physics (track + fork)
+        run: cargo test -p sim-physics --locked
+      - name: roadcase slice
+        run: cargo test -p sim-gpu --lib roadcase --locked
+      - name: luau export (golden artifact)
+        run: cargo run -p sim-physics --example luau_export --locked -- games/roadcase/tracks/roadcase-highway.ron /tmp/roadcase_track.luau
+      - name: artifact matches committed
+        run: cmp /tmp/roadcase_track.luau games/roadcase-roblox/roadcase_track.luau

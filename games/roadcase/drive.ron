@@ -1,0 +1,85 @@
+// ROADCASE from the driver's seat on the dusk highway. The track is `track:` in game.ron; this file says how it
+// looks and how the keys drive. Keys: up throttle, down brake, left/right steer, A/Z paddles, Backspace reverse,
+// C camera (cockpit → chase → top-down), G play mode, O autopilot, P pause, R restart, M mute, Esc quit.
+// Only one sign repeats in the whole slice: MEL'S DINER - 22 MILES (assets/roadcase/mels.png), on the billboards
+// below and nowhere else.
+Drive(
+    cars: "car",
+    you: ("human", 1),
+    cockpit: (
+        fov: 50.0,
+        wheel: (lock: 190.0),
+        shift_lights: (7800.0, 9200.0),
+    ),
+    controls: (
+        action: "drive",
+        axes: {
+            "throttle": (key: "up", rise_ms: 180.0, fall_ms: 120.0),
+            "brake": (key: "down", rise_ms: 160.0, fall_ms: 100.0),
+            "steer": (neg: "right", pos: "left", rise_ms: 240.0, fall_ms: 180.0, speed_sensitive: (60.0, 0.1)),
+            "stick": (neg: "right", pos: "left", rise_ms: 120.0, fall_ms: 60.0),
+        },
+        buttons: [
+            (key: "a", action: "shift", args: { "dir": 1 }),
+            (key: "z", action: "shift", args: { "dir": -1 }),
+            (key: "backspace", action: "reverse", toggle: "on"),
+            (key: "g", action: "mode", cycle: (arg: "mode", prop: "pilot", values: [0, 2, 1])),
+        ],
+    ),
+    badge: (prop: "pilot", key: "g", labels: [
+        (0, "CONTROL", (255, 214, 64)),
+        (2, "GUIDED", (90, 200, 255)),
+        (1, "AUTOPILOT", (150, 255, 140)),
+    ]),
+    line_marker: (prop: "line", when: ("pilot", 2)),
+    autopilot: (action: "autopilot", arg: "on"),
+    look: (
+        // Dusk on the open road: a low sun behind the driver, dust and dry grass.
+        asphalt: (82, 82, 86),
+        apron: (140, 122, 96),
+        groove: 0.18,
+        white: (240, 236, 222),
+        yellow: (238, 190, 40),
+        grass: (150, 126, 84),
+        safer: (214, 210, 198),
+        concrete: (188, 178, 158),
+        pit_wall: (200, 190, 170),
+        sky: (36, 46, 78),
+        horizon: (216, 132, 92),
+        ground: (128, 100, 72),
+        sun: (196.0, 7.0),
+        sun_color: (255, 198, 150),
+        fog: (140.0, 2400.0),
+        haze: 0.55,
+        apron_width: 3.0,
+        apron_bank: 0.0,
+        wall_height: 1.1,
+        fence_height: 0.0,
+        line_width: 0.35,
+        pit_road: None,
+        stands: [],
+        trees: 0.0,
+        textures: {
+            "asphalt": (file: "race/asphalt.jpg", size: 4.0),
+            "grass": (file: "race/grass.jpg", size: 14.0),
+            "concrete": (file: "race/concrete.jpg", size: 1.25),
+            "safer": (file: "race/safer.jpg", size: 1.0),
+            "sky": (file: "race/sky.jpg", size: 90.0),
+            // The one repeating sign of the slice.
+            "sponsors": (file: "roadcase/mels.png", size: 4.0),
+            // The exit sign: the choice's name on the road, not only in the title.
+            "sign": (file: "roadcase/lantern.png", size: 4.0),
+        },
+        // No fence boards: the MEL sign is a roadside billboard, listed once per appearance.
+        boards: (0.0, 1),
+        billboards: [
+            (at: 700.0, side: 9.0, height: 3.0),
+            (at: 1900.0, side: 9.0, height: 3.0),
+            (at: 2250.0, side: 9.0, height: 3.0, texture: "sign"),
+        ],
+    ),
+    units: "kmh",
+    spotter: false,
+    screen: (1100, 700),
+    countdown: 0.0,
+)

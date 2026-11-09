@@ -1,0 +1,20 @@
+# ─────────────────────────────────────────────────────────────
+#  STEAM ENGINE — operator panel (roadcase)
+#  The 90-second opening drive: one car on an open dusk highway that ends at a fork. The world is big enough to
+#  hold the whole road (main 2.8 km plus the two arms) with room to spare; `car` is the field size.
+# ─────────────────────────────────────────────────────────────
+
+[run]
+seed = 1
+max_ticks = 36000
+tick_rate = 60
+
+[world]
+width = 5000
+height = 3200
+
+[spawn]
+car = 1
+
+[agent]
+controllable = ["car"]

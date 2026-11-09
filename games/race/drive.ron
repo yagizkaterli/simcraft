@@ -1,0 +1,123 @@
+// The race from the driver's seat of your car (the drive view, docs/architecture.md). The track and where it sits in
+// the world come from game.ron (`track:`); this file says how it looks, how the head moves, and how the keys drive.
+// Keys: up throttle, down brake, left/right steer (ramped, less at speed), A/Z paddles up/down, Backspace reverse,
+// T line steering / manual, C cockpit/chase/top-down, Tab ride on board the next car, O autopilot, P pause,
+// R restart, M mute, Esc quit.
+Drive(
+    cars: "car",
+    you: ("human", 1),
+    // The race's own words: lap counts on crossing the line, `lap_ms` is the last lap, `best_ms` the best.
+    props: (lap_time_ms: "", last_lap_ms: "lap_ms", best_lap_ms: "best_ms"),
+    cockpit: (
+        fov: 50.0,
+        // The wheel: a Cup car's ratio is about 12:1 on 16° of lock, so ±190° at full lock.
+        wheel: (lock: 190.0),
+        // The stock car's power band: lights from 7,800, flashing at 9,200 (redline 9,500).
+        shift_lights: (7800.0, 9200.0),
+    ),
+    controls: (
+        action: "drive",
+        axes: {
+            "throttle": (key: "up", rise_ms: 180.0, fall_ms: 120.0),
+            "brake": (key: "down", rise_ms: 160.0, fall_ms: 100.0),
+            // At 60 m/s and over only a tenth of the lock is left: an oval is taken with the wheel nearly straight.
+            "steer": (neg: "right", pos: "left", rise_ms: 240.0, fall_ms: 180.0, speed_sensitive: (60.0, 0.1)),
+            // The same keys for line steering: how fast your line moves, the same at any speed (the steering
+            // wheel's speed sensitivity would slow the line to a crawl at racing speed).
+            "stick": (neg: "right", pos: "left", rise_ms: 120.0, fall_ms: 60.0),
+        },
+        buttons: [
+            (key: "a", action: "shift", args: { "dir": 1 }),
+            (key: "z", action: "shift", args: { "dir": -1 }),
+            // Reverse in, and out on the next press.
+            (key: "backspace", action: "reverse", toggle: "on"),
+            // The play mode: CONTROL (0) → GUIDED (2) → AUTOPILOT (1) → CONTROL (the button on screen does the same).
+            (key: "g", action: "mode", cycle: (arg: "mode", prop: "pilot", values: [0, 2, 1])),
+        ],
+    ),
+    // The play mode, on a button at the bottom left: what `pilot` is on your car.
+    badge: (prop: "pilot", key: "g", labels: [
+        (0, "CONTROL", (255, 214, 64)),
+        (2, "GUIDED", (90, 200, 255)),
+        (1, "AUTOPILOT", (150, 255, 140)),
+    ]),
+    // From outside, the line you steer by, faint on the road ahead (while line steering is on).
+    line_marker: (prop: "line", when: ("pilot", 2)),
+    // O and `--auto`: the game's own driver takes your car, and gives it back.
+    autopilot: (action: "autopilot", arg: "on"),
+    look: (
+        // Charlotte on race day: late afternoon, the sun low over turn 2.
+        sun: (205.0, 24.0),
+        pit_road: (-300.0, 240.0),
+        stands: [ (from: -300.0, to: 240.0, depth: 44.0, rise: 0.52, tower: true),
+                  (from: 700.0, to: 1000.0, depth: 30.0, rise: 0.5, tower: false) ],
+        // Photographs (assets/race/, assets/src/README.md "Race"); a missing one keeps the view's own picture.
+        // `size`: metres a tile for ground, the height for strips along the walls, degrees round for the sky.
+        textures: {
+            "asphalt": (file: "race/asphalt.jpg", size: 4.0),
+            "groove": (file: "race/groove.jpg", size: 6.0),
+            "apron": (file: "race/apron.jpg", size: 4.0),
+            "pit": (file: "race/pit.jpg", size: 5.0),
+            "grass": (file: "race/grass.jpg", size: 12.0),
+            "safer": (file: "race/safer.jpg", size: 1.0),
+            "concrete": (file: "race/concrete.jpg", size: 1.25),
+            "crowd": (file: "race/crowd.jpg", size: 10.0),
+            "suites": (file: "race/suites.jpg", size: 6.5),
+            "sky": (file: "race/sky.jpg", size: 90.0),
+            "trees": (file: "race/trees.png", size: 22.0),
+            "dash": (file: "race/dash.jpg", size: 0.68),
+            "wheel": (file: "race/wheel.png", size: 0.35),
+            "banner": (file: "race/banner.jpg", size: 4.0),
+            "sponsors": (file: "race/sponsors.jpg", size: 3.0),
+            "logo": (file: "race/logo.png", size: 48.0),
+        },
+        // Sponsor boards on the fence every 45 m (six in the picture); the emblem behind the haulers and on the
+        // backstretch infield.
+        boards: (45.0, 6),
+        logos: [ (-30.0, 14.0), (1207.0, 8.0) ],
+        // Every car is this model (its nose along -x in the file), fitted to the kind's 1,996 × 4,912 mm and a Cup
+        // car's 1.3 m; its white paint takes each car's livery: (body, rockers and stripes), by car number.
+        model: (file: "race/stock_car.glb", forward: "-x", height: 1.3),
+        liveries: [
+            ((20, 22, 26), (250, 196, 30)),     // 8, 16, ...: black and yellow
+            ((30, 80, 190), (245, 245, 245)),   // 1 (you): blue and white
+            ((200, 28, 34), (245, 245, 245)),   // 2: red and white
+            ((250, 196, 30), (30, 30, 34)),     // 3: yellow and black
+            ((240, 110, 20), (25, 40, 90)),     // 4: orange and navy
+            ((245, 245, 245), (200, 28, 34)),   // 5: white and red
+            ((30, 150, 70), (245, 245, 245)),   // 6: green and white
+            ((120, 40, 150), (250, 196, 30)),   // 7: purple and gold
+        ],
+    ),
+    // In the window the field waits on the grid this long before the green (the menu music plays).
+    countdown: 4.0,
+    sound: (
+        // Recordings (assets/src/race/audio/README.md lists what goes there): the designer's drop folder first,
+        // then assets/race/audio. Any of .wav .flac .ogg .mp3; whatever is missing is synthesised (music and the
+        // pass-by are silent instead).
+        dirs: ["src/race/audio", "race/audio"],
+        buses: (engine: 1.0, others: 0.7, effects: 0.8, voice: 1.0, music: 0.45),
+        // Your engine: loops tagged with the rpm they were recorded at, crossfaded by rpm and throttle.
+        loops: [
+            (file: "engine_idle", rpm: 1800.0, load: Both),
+            (file: "engine_low", rpm: 4000.0, load: On),
+            (file: "engine_mid", rpm: 6200.0, load: On),
+            (file: "engine_high", rpm: 8800.0, load: On),
+            (file: "engine_off", rpm: 6000.0, load: Off),
+        ],
+        // Or one steady sweep, idle to redline, cut into six loops (they replace the on-load loops above).
+        sweep: (file: "engine_sweep", from: 2000.0, to: 9500.0, bands: 6),
+        files: { "squeal": "tyre_squeal" },
+        // The music ducks under your engine.
+        duck: 0.6,
+        // The spotter on the radio (assets/race/voice): each call says the first line that exists. Car low has no
+        // line of its own yet ("inside" says it); clear after a car low or high says which, else plain "clear".
+        voice: (dir: "race/voice", lines: {
+            "car_low": ["car_low", "inside"],
+            "clear_low": ["clear_low", "clear"],
+            "clear_high": ["clear_high", "clear"],
+        }),
+    ),
+    units: "mph",
+    screen: (1440, 810),
+)

@@ -39,12 +39,24 @@ pub struct GameDef {
     /// Environments this game uses (`envs/<name>.ron`); merged in at load.
     #[serde(default)]
     pub environments: Vec<String>,
+    /// The surface vehicles drive on: a track file (relative to the game) laid from `origin` (mm), and its grid.
+    #[serde(default)]
+    pub track: Option<TrackRef>,
     /// Filled by the merge: the environments' own rules (salted after every other rule).
     #[serde(skip)]
     pub env_rules: Vec<RuleDef>,
     /// Filled by the merge: the environment kinds, in `environments` order.
     #[serde(skip)]
     pub env_kinds: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TrackRef {
+    pub file: String,
+    pub origin: (i64, i64),
+    #[serde(default)]
+    pub grid: sim_core::Grid,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
@@ -60,6 +72,10 @@ pub enum Perception {
 pub struct FieldDef {
     #[serde(default)]
     pub init: i64,
+    /// `init` only from this level down (deeper, larger z); above it the field starts at 0. Ground under air:
+    /// `(init: 1, from_level: 16)`.
+    #[serde(default)]
+    pub from_level: Option<i64>,
     /// % of the difference to the 6 face neighbours' average moved per tick (0 = none).
     #[serde(default)]
     pub diffusion: i64,
@@ -110,6 +126,9 @@ impl GameDef {
                     props: env.props.clone(),
                     fsm: env.fsm.clone(),
                     solid: false,
+                    cling: false,
+                    motion: None,
+                    vehicle: None,
                     hidden: true,
                     glyphs: BTreeMap::new(),
                     senses: BTreeMap::new(),
@@ -216,9 +235,21 @@ pub struct KindDef {
     /// At most one solid per cell; solids cannot pass through each other.
     #[serde(default)]
     pub solid: bool,
+    /// Crawls: only enters voxels touching `terrain` (floors, walls, ceilings), so it climbs and never floats.
+    /// `Wander` and `Climb` pick among those; `[spawn]` places it on surfaces.
+    #[serde(default)]
+    pub cling: bool,
     /// Not drawn (environments).
     #[serde(default)]
     pub hidden: bool,
+    /// Moves continuously: fine positions and velocities integrated every tick (docs/architecture.md,
+    /// Continuous motion). `size` is its footprint (across, along; fine units).
+    #[serde(default)]
+    pub motion: Option<sim_core::Motion>,
+    /// A vehicle: the physics layer drives it as this car (`vehicles/<name>.ron` next to or above the game, or
+    /// `assets/vehicles/<name>.ron`; docs/architecture.md, Vehicles). Needs `motion`.
+    #[serde(default)]
+    pub vehicle: Option<String>,
     /// Glyph per state (else `glyph`).
     #[serde(default)]
     pub glyphs: BTreeMap<String, char>,
@@ -378,6 +409,8 @@ pub enum Do {
     Despawn(Target),
     /// Spawns a new kind at its own position.
     Spawn(String),
+    /// Spawns a kind at its own cell offset by (dx, dy) cells (expressions): traffic ahead of or behind a player.
+    SpawnAt(String, String, String),
     MoveToward(String),
     MoveAway(String),
     /// One step up a gradient: to the neighbouring cell whose `kind` has the highest `prop`.

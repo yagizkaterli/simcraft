@@ -1,0 +1,49 @@
+// Roadcase, the 90-second opening drive: a dusk highway that does not close, and a fork at its end where the slice
+// ends (design/90-second-opening-drive-spec.md: "register the choice and end the slice cleanly"). Distances mm,
+// angles hundredths of a degree. The two arms are real geometry, each with its own length and end wall, so the
+// choice is measured rather than described.
+(
+    name: "roadcase-highway",
+    width: 12000,
+    start: (0, 0, 0),
+    blend: 20000,
+    closed: false,
+    // Left: open desert (no wall). Right: a shoulder, then the barrier.
+    left: (width: 6000, grip: 700, wall: false),
+    right: (width: 3000, grip: 700, wall: true),
+    fork: Some((
+        arms: [
+            // HIGHWAY 9 keeps going, a long bend to the left.
+            (
+                name: "HIGHWAY 9",
+                left: (width: 5000, grip: 700, wall: false),
+                right: (width: 3000, grip: 700, wall: true),
+                end_wall: true,
+                segments: [
+                    (shape: Straight(500000), bank: 0, name: "Highway"),
+                    (shape: EasedLeft(1200000, 700, 100000), bank: 0, name: "Highway bend"),
+                ],
+            ),
+            // LANTERN MOTEL EXIT leaves to the right and stops at the motel.
+            (
+                name: "LANTERN MOTEL EXIT",
+                width: 7000,
+                left: (width: 4000, grip: 700, wall: false),
+                right: (width: 2000, grip: 700, wall: true),
+                end_wall: true,
+                segments: [
+                    (shape: EasedRight(300000, 3000, 0), bank: 0, name: "Exit ramp"),
+                    (shape: Straight(180000), bank: 0, name: "Motel"),
+                ],
+            ),
+        ],
+    )),
+    segments: [
+        (shape: Straight(700000), bank: 0, name: "Opening straight"),
+        (shape: EasedLeft(900000, 1000, 120000), bank: 0, name: "Mild curve"),
+        (shape: Straight(500000), bank: 0, name: "Shoulder"),
+        (shape: EasedRight(700000, 1000, 100000), bank: 0, name: "S-curve"),
+        (shape: Straight(450000), bank: 0, name: "Approach"),
+        (shape: EasedLeft(1500000, 500, 80000), bank: 0, name: "Fork approach"),
+    ],
+)
